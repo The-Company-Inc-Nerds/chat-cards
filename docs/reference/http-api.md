@@ -73,12 +73,17 @@ concurrently, so a slow lookup never reorders the reel.
 | Method | Path | Body | Purpose |
 |---|---|---|---|
 | `POST` | `/api/scan` | multipart, field `image` | queue a card; returns `{uid, seq}` at once |
-| `POST` | `/api/pack` | `{size, winner?, label?}` | open a pack, closing any open one |
+| `POST` | `/api/pack` | `{size, winner?, label?, ref?}` | open a pack, closing any open one |
 | `POST` | `/api/pack/close` | — | close the current pack |
 | `POST` | `/api/session/reset` | — | clear all packs and cards |
 
 `POST /api/scan` returns as soon as the upload is stored. Identification and
 pricing happen in the background and arrive over the WebSocket.
+
+`ref` is an opaque correlation id stored on the pack and echoed back in every
+report — it is how multichat matches a pack to the giveaway turn that opened it
+(see [the giveaway loop](../guides/giveaway-loop.md)). It is never rendered on
+the overlay.
 
 ## Corrections
 

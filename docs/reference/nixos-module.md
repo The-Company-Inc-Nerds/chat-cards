@@ -29,9 +29,10 @@ overlay at `http://<host>:8787/overlay`.
 
 ## Secrets
 
-`apiKeyFile`, `tokenFile` and `pricechartingTokenFile` take **paths, not values**. They are handed to the
-unit through systemd's `LoadCredential=`, which copies the contents into a
-private tmpfs the service reads at startup.
+`apiKeyFile`, `tokenFile`, `pricechartingTokenFile` and `report.tokenFile` take
+**paths, not values**. They are handed to the unit through systemd's
+`LoadCredential=`, which copies the contents into a private tmpfs the service
+reads at startup.
 
 Never write the key inline in a Nix expression. Everything in a Nix expression
 ends up in `/nix/store`, which is world-readable.
@@ -50,6 +51,8 @@ Works with agenix, sops-nix, or a plain root-owned file.
 | `apiKeyFile` | `null` | required unless `mock` |
 | `tokenFile` | `null` | shared token for `/scan`, `/overlay` and the API |
 | `pricechartingTokenFile` | `null` | PriceCharting API token; makes it the primary price source |
+| `report.url` | `null` | multichat `/api/turn-report` URL; see [the giveaway loop](../guides/giveaway-loop.md) |
+| `report.tokenFile` | `null` | bearer multichat requires there; unnecessary over loopback |
 | `segment` | `"pokemon"` | name, shortname or UUID; `null` to auto-detect |
 | `defaultPackSize` | `5` | what the scanner offers |
 | `pricing.period` | `"90d"` | see [pricing](pricing.md) |
@@ -63,6 +66,38 @@ Works with agenix, sops-nix, or a plain root-owned file.
 | `mock` | `false` | canned data, no key, nothing billed |
 | `tls.certFile` / `tls.keyFile` | `null` | serve HTTPS; enables the live camera preview on iOS |
 | `extraArgs` | `[]` | appended to the command line verbatim |
+
+## Reporting to multichat
+
+`report.url` closes the giveaway loop: multichat draws a winner and opens a pack
+here, and every pack is POSTed back as its cards are scanned and priced. Both
+services usually share a box, so both calls stay on loopback and neither needs a
+token — multichat requires its `integrations.callbackToken` only from a
+non-loopback peer.
+
+```nix
+services.chat-cards = {
+  enable = true;
+  port = 8787;
+  report.url = "http://127.0.0.1:8081/api/turn-report";
+};
+
+services.multichat = {
+  enable = true;
+  port = 8081;
+  giveaway = { enable = true; channel = "yourchannel"; };
+  integrations.subscribers = [{
+    name = "chat-cards";
+    adapter = "chat-cards";
+    baseUrl = "http://127.0.0.1:8787";
+    packSize = 5;
+  }];
+};
+```
+
+Setting `report.tokenFile` without `report.url` fails the build — the token would
+have nowhere to go. See [the giveaway loop](../guides/giveaway-loop.md) for the
+whole picture.
 
 ## HTTPS and the iPhone camera
 

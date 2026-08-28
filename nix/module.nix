@@ -75,6 +75,41 @@ in {
       '';
     };
 
+    report = {
+      url = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "http://127.0.0.1:8081/api/turn-report";
+        description = ''
+          multichat's `/api/turn-report` URL. When set, every pack this service
+          opens is POSTed there as its cards are scanned and priced, so
+          multichat's per-winner giveaway ledger stays complete. Each POST
+          carries the pack's full current state, so a dropped update is
+          reconciled by the next one and a multichat that is down never
+          interrupts the reveal.
+
+          Pair it with multichat's own `integrations.subscribers` entry pointing
+          back at this service — that is the half that opens the pack in the
+          first place.
+        '';
+      };
+
+      tokenFile = mkOption {
+        type = types.nullOr types.path;
+        default = null;
+        example = "/run/secrets/multichat-callback-token";
+        description = ''
+          File containing the bearer token multichat requires on
+          `/api/turn-report` (its `integrations.callbackToken`). Passed through
+          systemd's `LoadCredential=`, so it never enters the Nix store.
+
+          Only needed when multichat is on another host: multichat accepts
+          unauthenticated reports over loopback, so two services on the same box
+          need no token at all.
+        '';
+      };
+    };
+
     segment = mkOption {
       type = types.nullOr types.str;
       default = "pokemon";
@@ -225,6 +260,10 @@ in {
         assertion = (cfg.tls.certFile == null) == (cfg.tls.keyFile == null);
         message = "services.chat-cards: tls.certFile and tls.keyFile must be set together.";
       }
+      {
+        assertion = cfg.report.tokenFile == null || cfg.report.url != null;
+        message = "services.chat-cards: report.tokenFile is set but report.url is not — the token has nowhere to be sent.";
+      }
     ];
 
     services.chat-cards.package = lib.mkDefault (pkgs.callPackage ./package.nix {});
@@ -266,6 +305,7 @@ in {
           ]
           ++ optional (!cfg.pricing.fallbacks) "--no-pricing-fallbacks"
           ++ ["--bulk-value" (toString cfg.pricing.bulkValue)]
+          ++ optionals (cfg.report.url != null) ["--report-url" cfg.report.url]
           ++ optional (!cfg.autoDeleteUnmatched) "--keep-unmatched"
           ++ optional cfg.mock "--mock"
           ++ optionals (cfg.tls.certFile != null) ["--tls-cert" "${cfg.tls.certFile}" "--tls-key" "${cfg.tls.keyFile}"]
@@ -277,7 +317,8 @@ in {
         LoadCredential =
           optional (cfg.apiKeyFile != null) "api-key:${cfg.apiKeyFile}"
           ++ optional (cfg.tokenFile != null) "token:${cfg.tokenFile}"
-          ++ optional (cfg.pricechartingTokenFile != null) "pricecharting-token:${cfg.pricechartingTokenFile}";
+          ++ optional (cfg.pricechartingTokenFile != null) "pricecharting-token:${cfg.pricechartingTokenFile}"
+          ++ optional (cfg.report.tokenFile != null) "report-token:${cfg.report.tokenFile}";
 
         # $STATE_DIRECTORY is picked up by the app for session state, captured
         # photos and the catalog-image cache.

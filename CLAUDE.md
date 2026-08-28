@@ -46,10 +46,13 @@ on `Pack.ref` and echoed back, never shown on stream), and the `Reporter`
 subscribes to the `Store` event stream and POSTs each pack's cards + running
 value back to multichat's `/api/turn-report` so its per-winner ledger stays
 complete. Enable with `--report-url URL` + `CHAT_CARDS_REPORT_TOKEN`
-(or `--report-token-file`); it runs in mock mode too, so the whole
-giveaway→pack→ledger loop can be rehearsed offline. `pack_summary()` is pure and
-unit-tested in `tests/` (stdlib `unittest`: `PYTHONPATH=src python -m unittest
-discover -s tests`).
+(or `--report-token-file`), or `services.chat-cards.report.url` /
+`report.tokenFile` on NixOS; it runs in mock mode too, so the whole
+giveaway→pack→ledger loop can be rehearsed offline. No token is needed when both
+services share a box — multichat accepts unauthenticated reports over loopback.
+`docs/guides/giveaway-loop.md` is the operator-facing version. `pack_summary()`
+is pure and unit-tested in `tests/` (stdlib `unittest`: `PYTHONPATH=src python -m
+unittest discover -s tests`).
 
 ## Committing: write the message, never run `git commit`
 
