@@ -1,0 +1,19 @@
+.direnv
+result
+result/
+
+# gcommit scratchpad — the staged-but-unsigned commit message (never committed)
+GIT_COMMIT_MSG
+
+# build-wiki preview output
+wiki-build
+
+# local-only Claude Code settings
+.claude/settings.local.json
+
+# python (tools/build_wiki.py)
+__pycache__
+
+# local run state (default --state-dir ./state)
+state
+state/

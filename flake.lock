@@ -1,0 +1,48 @@
+{
+  "nodes": {
+    "antlers": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1786640315,
+        "narHash": "sha256-QYArhyNn+3Y5sY0+gkaILTvJk4vcDhUIgNOylfh8uRg=",
+        "owner": "CalamooseLabs",
+        "repo": "antlers",
+        "rev": "50dd0f23d26a506a48468fe9ccc60190be2cc8f1",
+        "type": "github"
+      },
+      "original": {
+        "owner": "CalamooseLabs",
+        "repo": "antlers",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1787736819,
+        "narHash": "sha256-cV5xEJJK3BvhU8rEd4mC9UsmDi5qscv/kzGPhBRC5WA=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "9fbb54b33e91ee4ca368e35a78e0613c720600b3",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "antlers": "antlers",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

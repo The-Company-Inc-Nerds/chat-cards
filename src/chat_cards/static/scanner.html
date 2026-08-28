@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0b0d15">
+<title>Card scanner</title>
+<link rel="stylesheet" href="/static/scanner.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="totals">
+    <span class="totals__value" id="total-value">$0.00</span>
+    <span class="totals__count"><span id="total-count">0</span> cards</span>
+  </div>
+  <div class="link" id="link" title="Connection"><span class="link__dot"></span><span id="link-text">…</span></div>
+</header>
+
+<section class="packbar" id="packbar">
+  <div class="packbar__info">
+    <span class="packbar__title" id="pack-title">No pack open</span>
+    <span class="packbar__sub" id="pack-sub">Start one before you scan</span>
+  </div>
+  <button class="btn btn--accent" id="new-pack">New pack</button>
+</section>
+
+<main class="viewfinder" id="viewfinder">
+  <video id="video" playsinline muted autoplay></video>
+  <div class="viewfinder__guide"><span></span></div>
+  <p class="viewfinder__hint" id="viewfinder-hint">Starting camera…</p>
+  <div class="flash" id="flash"></div>
+</main>
+
+<div class="shutterbar">
+  <button class="shutter" id="shutter" aria-label="Scan card">
+    <span class="shutter__ring"></span>
+    <span class="shutter__core"></span>
+  </button>
+  <span class="shutterbar__hint" id="shutter-hint">Hold the card flat and fill the frame</span>
+</div>
+
+<input type="file" id="file-input" accept="image/*" capture="environment" hidden>
+
+<section class="feed">
+  <h2 class="feed__heading">This pack</h2>
+  <ul class="feed__list" id="feed"></ul>
+  <p class="feed__empty" id="feed-empty">Nothing scanned yet.</p>
+</section>
+
+<!-- New-pack sheet -->
+<div class="sheet" id="pack-sheet" hidden>
+  <div class="sheet__panel">
+    <h2 class="sheet__title">Open a new pack</h2>
+    <label class="field">
+      <span class="field__label">Opening for (optional)</span>
+      <input class="field__input" id="pack-winner" type="text" placeholder="@twitch_name"
+             autocapitalize="none" autocorrect="off" enterkeyhint="done">
+    </label>
+    <div class="field">
+      <span class="field__label">Cards in this pack</span>
+      <div class="stepper">
+        <button class="stepper__btn" id="size-down" aria-label="Fewer cards">−</button>
+        <input class="stepper__value" id="pack-size" type="number" inputmode="numeric" value="5" min="1" max="40">
+        <button class="stepper__btn" id="size-up" aria-label="More cards">+</button>
+      </div>
+    </div>
+    <div class="sheet__actions">
+      <button class="btn btn--ghost" data-close-sheet>Cancel</button>
+      <button class="btn btn--accent" id="pack-start">Start pack</button>
+    </div>
+  </div>
+</div>
+
+<!-- Correction sheet -->
+<div class="sheet" id="card-sheet" hidden>
+  <div class="sheet__panel">
+    <h2 class="sheet__title" id="card-sheet-title">Fix this card</h2>
+    <p class="sheet__sub" id="card-sheet-sub"></p>
+
+    <label class="field">
+      <span class="field__label">Name on stream</span>
+      <input class="field__input" id="card-name" type="text" placeholder="Charizard ex"
+             autocapitalize="words" autocorrect="off" enterkeyhint="done">
+      <span class="field__hint" id="card-name-hint" hidden></span>
+    </label>
+
+    <label class="field">
+      <span class="field__label">Market price</span>
+      <input class="field__input" id="card-price" type="number" inputmode="decimal" step="0.01" placeholder="0.00">
+      <span class="field__hint" id="card-price-hint" hidden></span>
+    </label>
+
+    <div class="field" id="alt-field" hidden>
+      <span class="field__label">Did you mean</span>
+      <div class="chips" id="alt-chips"></div>
+    </div>
+
+    <label class="field">
+      <span class="field__label">Search the catalog</span>
+      <input class="field__input" id="card-search" type="search" placeholder="Charizard ex 223"
+             autocapitalize="none" autocorrect="off" enterkeyhint="search">
+    </label>
+    <div class="chips" id="search-results"></div>
+
+    <div class="sheet__actions">
+      <button class="btn btn--danger" id="card-delete">Delete</button>
+      <button class="btn btn--ghost" data-close-sheet>Close</button>
+      <button class="btn btn--accent" id="card-save">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script src="/static/scanner.js"></script>
+</body>
+</html>

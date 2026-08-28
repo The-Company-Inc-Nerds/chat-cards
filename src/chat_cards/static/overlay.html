@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>chat-cards overlay</title>
+<link rel="stylesheet" href="/static/overlay.css">
+</head>
+<body>
+<div class="stage" id="stage">
+  <header class="hud">
+    <div class="hud__pack" id="pack-panel" hidden>
+      <div class="pack__heading">
+        <span class="pack__index" id="pack-index">Pack 1</span>
+        <span class="pack__winner" id="pack-winner"></span>
+      </div>
+      <div class="pack__value" id="pack-value">$0.00</div>
+      <div class="pack__progress">
+        <div class="pips" id="pack-pips"></div>
+        <span class="pack__count" id="pack-count">0 / 5</span>
+      </div>
+    </div>
+
+    <div class="hud__session">
+      <div class="stat">
+        <span class="stat__label">Total pulled</span>
+        <span class="stat__value stat__value--money" id="total-value">$0.00</span>
+      </div>
+      <div class="stat stat--tight">
+        <span class="stat__label">Cards</span>
+        <span class="stat__value" id="total-count">0</span>
+      </div>
+    </div>
+  </header>
+
+  <section class="reel" id="reel">
+    <div class="reel__track" id="track"></div>
+  </section>
+
+  <div class="banner" id="banner" hidden>
+    <span class="banner__label" id="banner-label"></span>
+    <span class="banner__sub" id="banner-sub"></span>
+  </div>
+</div>
+
+<template id="slot-template">
+  <div class="slot">
+    <div class="card">
+      <div class="card__frame">
+        <img class="card__art" alt="" decoding="async">
+        <div class="card__shimmer"></div>
+      </div>
+      <div class="card__badge"></div>
+    </div>
+    <div class="meta">
+      <div class="meta__name"></div>
+      <div class="meta__price"></div>
+    </div>
+  </div>
+</template>
+
+<script src="/static/overlay.js"></script>
+</body>
+</html>
