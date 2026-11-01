@@ -40,11 +40,16 @@ FILE` preflights a real key against the CardSight API.
 ## Pricing recorded videos
 
 `chat_cards/video.py` (`price-video` in the dev shell, `chat-cards-video` when
-installed) finds each card revealed in a pack-opening clip. It looks for still
-beats via ffmpeg motion analysis, identifies the stillest frame of each, merges
-repeat sightings, prices the cards with the server's PriceCharting → CardSight →
+installed) finds each card revealed in a pack-opening clip. It analyses
+motion with ffmpeg in a centre crop of the frame, so on-screen captions are
+ignored. Each local dip in motion becomes a candidate, because fast-cut shorts
+are never fully still. It identifies those frames, merges repeat sightings, prices the cards with the server's PriceCharting → CardSight →
 bulk order, and writes a CSV (optionally an SRT) with timestamps and a running
-total. `--mock` rehearses offline, and `--at` takes explicit timestamps. The
+total. `--mock` rehearses offline, and `--at` takes explicit timestamps.
+`--reprice CSV` re-reads a hand-corrected CSV and reprices it with
+PriceCharting alone, with no video and no CardSight calls. Each row is priced
+from its name, number, set and language columns, and
+`price_source=manual` rows are kept as they are. The
 pure helpers are unit-tested in `tests/test_video.py`.
 `docs/guides/video-pricing.md` is the user-facing guide.
 

@@ -85,9 +85,14 @@ Two things the integration has to get right, both verified against the live API:
   which is twelve times the price. So the product list is fetched and the
   variant chosen from the parallel CardSight detected — no bracket for a base
   card. An ambiguous list returns nothing and falls through to CardSight.
-- **Language.** Their Japanese sets are named "Pokemon Japanese Clay Burst", so
-  the query includes the language CardSight reported or a Japanese card matches
-  the English set of the same name.
+- **Language.** Their Japanese sets are named "Pokemon Japanese Clay Burst"
+  (Korean and Chinese work the same way), so the query includes the language
+  CardSight reported. A product in a different language is never accepted. A
+  Korean card with no Korean listing falls through rather than taking the
+  English price. When the number still leaves several products, the language
+  and set name break the tie.
+- **Number.** Matched exactly against the product name after normalising the
+  printed form. `052/103` searches as `#52`, and `#5` never matches `#55`.
 
 Notes from their API: prices are integers in **pennies**, `loose-price` is the
 ungraded figure, only current values are served (no historic sales), and the
