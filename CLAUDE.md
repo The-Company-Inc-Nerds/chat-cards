@@ -37,6 +37,17 @@ billed — and `serve --key KEY` (or `--key-file`, `--key-stdin`) runs it live.
 Extra arguments pass through to the server. `tools/live_check.py --api-key-file
 FILE` preflights a real key against the CardSight API.
 
+## Pricing recorded videos
+
+`chat_cards/video.py` (`price-video` in the dev shell, `chat-cards-video` when
+installed) finds each card revealed in a pack-opening clip. It looks for still
+beats via ffmpeg motion analysis, identifies the stillest frame of each, merges
+repeat sightings, prices the cards with the server's PriceCharting → CardSight →
+bulk order, and writes a CSV (optionally an SRT) with timestamps and a running
+total. `--mock` rehearses offline, and `--at` takes explicit timestamps. The
+pure helpers are unit-tested in `tests/test_video.py`.
+`docs/guides/video-pricing.md` is the user-facing guide.
+
 ## Giveaway integration (multichat)
 
 `chat_cards/reporter.py` lets this app act as the pack-opening side of the

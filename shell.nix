@@ -132,6 +132,25 @@
   '';
 
   # ---------------------------------------------------------------------------
+  # price-video — find, identify and price every card in a pack-opening clip,
+  # exporting a CSV (and optionally an SRT) for editing shorts. Runs from ./src
+  # like `serve`; see src/chat_cards/video.py or `price-video --help`.
+  # ---------------------------------------------------------------------------
+  price-video = pkgs.writeShellScriptBin "price-video" ''
+    set -euo pipefail
+    root="$PWD"
+    while [ "$root" != "/" ] && [ ! -d "$root/src/chat_cards" ]; do
+      root="$(dirname "$root")"
+    done
+    if [ ! -d "$root/src/chat_cards" ]; then
+      echo "price-video: run this from inside the chat-cards repo" >&2
+      exit 1
+    fi
+    PATH="${pkgs.ffmpeg-headless}/bin:$PATH" \
+      PYTHONPATH="$root/src" exec ${pythonEnv}/bin/python3 -m chat_cards.video "$@"
+  '';
+
+  # ---------------------------------------------------------------------------
   # gcommit — the signed-commit workflow.
   #
   # Commits and tags in this repo are cryptographically *signed* by a human key.
@@ -274,6 +293,7 @@ in
       pkgs.gh
       pythonEnv
       serve
+      price-video
       gcommit
       build-wiki
       publish-wiki
@@ -290,5 +310,6 @@ in
       echo "  serve                  run in mock mode (no key, nothing billed)"
       echo "  serve --key KEY        run live against the CardSight API"
       echo "  serve --help           key-file, port and pass-through options"
+      echo "  price-video CLIP -n 10 price every card in a pack-opening video -> CSV"
     '';
   }

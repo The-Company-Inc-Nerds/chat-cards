@@ -1,6 +1,7 @@
 {
   lib,
   python3Packages,
+  ffmpeg-headless,
 }:
 python3Packages.buildPythonApplication {
   pname = "chat-cards";
@@ -19,6 +20,10 @@ python3Packages.buildPythonApplication {
 
   build-system = [python3Packages.setuptools];
   dependencies = [python3Packages.aiohttp];
+
+  # chat-cards-video shells out to ffmpeg/ffprobe; pin them so the installed
+  # command works without ffmpeg on the user's PATH.
+  makeWrapperArgs = ["--prefix" "PATH" ":" (lib.makeBinPath [ffmpeg-headless])];
 
   pythonImportsCheck = ["chat_cards"];
   doCheck = false;
