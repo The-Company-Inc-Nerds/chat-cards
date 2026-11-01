@@ -55,39 +55,96 @@ def _wanted_variant(parallel_name: str | None) -> str | None:
     return lowered
 
 
+# PriceCharting spells the print language out in the set ("console") name:
+# "Pokemon Japanese Clay Burst", "Pokemon Korean Cyber Judge". English sets carry
+# no language word at all.
+LANGUAGE_WORDS = {"ja": "japanese", "ko": "korean", "zh": "chinese"}
+_LANGUAGE_ALIASES = {
+    "japanese": "ja", "jp": "ja", "jpn": "ja",
+    "korean": "ko", "kr": "ko", "kor": "ko",
+    "chinese": "zh", "cn": "zh", "chi": "zh",
+    "english": "en", "eng": "en",
+}
+
+
+def language_code(language: str | None) -> str | None:
+    """'Japanese', 'jp', 'ja', 'ja-JP' -> 'ja'. Unknown or blank -> None."""
+    if not language:
+        return None
+    text = language.strip().lower()
+    if not text:
+        return None
+    if text in _LANGUAGE_ALIASES:
+        return _LANGUAGE_ALIASES[text]
+    return text.split("-")[0][:2] or None
+
+
+def language_word(language: str | None) -> str | None:
+    """The word PriceCharting puts in the set name, or None for English."""
+    return LANGUAGE_WORDS.get(language_code(language) or "")
+
+
+def normalise_number(number: str | None) -> str | None:
+    """'052/185' -> '52', '007' -> '7', 'SM230' unchanged.
+
+    PriceCharting names products "Morpeko #52": no printed set total, no
+    leading zeros. Cards print "052/185".
+    """
+    if not number:
+        return None
+    text = number.strip().lstrip("#").split("/")[0].strip()
+    if text.isdigit():
+        text = text.lstrip("0") or "0"
+    return text or None
+
+
 def build_query(name: str, number: str | None, release: str | None, language: str | None) -> str:
     """Compose the full-text query.
 
     PriceCharting names its Japanese sets "Pokemon Japanese Clay Burst", so the
     language has to be in the query or a Japanese card matches the English set
-    of the same name.
+    of the same name. Korean and Chinese work the same way.
     """
     parts = [name]
+    number = normalise_number(number)
     if number:
         parts.append(f"#{number}")
     parts.append("pokemon")
-    if language and language.lower().startswith("ja"):
-        parts.append("japanese")
+    word = language_word(language)
+    if word:
+        parts.append(word)
     if release:
         parts.append(release)
     return " ".join(parts)
 
 
+def _words(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
 def choose_product(
-    products: list[dict[str, Any]], number: str | None, parallel_name: str | None
+    products: list[dict[str, Any]],
+    number: str | None,
+    parallel_name: str | None,
+    release: str | None = None,
+    language: str | None = None,
 ) -> dict[str, Any] | None:
     """Pick the right product, or nothing at all.
 
     Refuses to guess. A wrong pick here is not a small error: the reverse-holo
-    Growlithe is twelve times the price of the plain one.
+    Growlithe is twelve times the price of the plain one. When the number and
+    variant still leave several products (the same card number in the English,
+    Japanese and Korean printings of a set), the language and set name settle it.
     """
     if not products:
         return None
 
     candidates = products
+    number = normalise_number(number)
     if number:
         # "#55" must match exactly; "#5" must not satisfy a search for "#55".
-        exact = [p for p in candidates if f"#{number}" in str(p.get("product-name", ""))]
+        pattern = re.compile(rf"#{re.escape(number)}(?![0-9A-Za-z])")
+        exact = [p for p in candidates if pattern.search(str(p.get("product-name", "")))]
         if exact:
             candidates = exact
 
@@ -101,9 +158,45 @@ def choose_product(
         # A base card is the one with no bracketed variant in its name.
         matching = [p for p in candidates if not BRACKET.search(str(p.get("product-name", "")))]
 
+    word = language_word(language)
+    if word:
+        # A Korean or Japanese print is a different card economically. When the
+        # language is known, an English product is never an acceptable answer.
+        matching = [p for p in matching if word in _words(str(p.get("console-name", "")))]
+
+    if len(matching) > 1:
+        matching = _narrow_by_set(matching, release, language)
+
     if len(matching) == 1:
         return matching[0]
     return None
+
+
+def _narrow_by_set(
+    products: list[dict[str, Any]], release: str | None, language: str | None
+) -> list[dict[str, Any]]:
+    """Tie-break on the set ("console") name; never widens the list."""
+    word = language_word(language)
+    all_words = set(LANGUAGE_WORDS.values())
+
+    def console(p: dict[str, Any]) -> set[str]:
+        return _words(str(p.get("console-name", "")))
+
+    if word:
+        by_language = [p for p in products if word in console(p)]
+    else:
+        # English: the set name carries no language word.
+        by_language = [p for p in products if not (console(p) & all_words)]
+    if by_language:
+        products = by_language
+
+    if release and len(products) > 1:
+        wanted = _words(release) - {"pokemon", "the", "and"}
+        if wanted:
+            by_set = [p for p in products if wanted <= console(p)]
+            if by_set:
+                products = by_set
+    return products
 
 
 def price_from(product: dict[str, Any], key: str = "loose-price") -> float | None:
@@ -114,8 +207,14 @@ def price_from(product: dict[str, Any], key: str = "loose-price") -> float | Non
 
 
 class PriceChartingClient:
-    def __init__(self, token: str | None, rate_limit: float = DEFAULT_RATE_LIMIT) -> None:
+    def __init__(self, token: str | None, rate_limit: float = DEFAULT_RATE_LIMIT, retries: int = 0) -> None:
         self._token = token
+        # Retries on 429 / timeouts. Off for the live server, where a late price
+        # is worse than falling through to CardSight; on for batch repricing,
+        # where PriceCharting throttles a long run of lookups.
+        self._retries = max(0, retries)
+        # Why the last price() returned None, for callers that report it.
+        self.last_miss: str | None = None
         self._session: aiohttp.ClientSession | None = None
         self._min_interval = 1.0 / rate_limit if rate_limit > 0 else 0.0
         self._lock = asyncio.Lock()
@@ -146,17 +245,29 @@ class PriceChartingClient:
     async def _get(self, path: str, params: dict[str, str]) -> dict[str, Any] | None:
         if not self._token or self._session is None or self._session.closed:
             return None
-        await self._throttle()
-        try:
-            async with self._session.get(
-                f"{BASE_URL}{path}", params={**params, "t": self._token}
-            ) as response:
-                if response.status >= 400:
-                    log.info("PriceCharting %s returned %s", path, response.status)
-                    return None
-                payload = await response.json(content_type=None)
-        except Exception as exc:  # a slow third party must never fail a scan
-            log.info("PriceCharting %s failed: %s", path, exc)
+        payload: dict[str, Any] | None = None
+        for attempt in range(self._retries + 1):
+            await self._throttle()
+            try:
+                async with self._session.get(
+                    f"{BASE_URL}{path}", params={**params, "t": self._token}
+                ) as response:
+                    if response.status == 429 and attempt < self._retries:
+                        log.info("PriceCharting %s rate limited — retrying", path)
+                        await asyncio.sleep(3.0 * (attempt + 1))
+                        continue
+                    if response.status >= 400:
+                        log.info("PriceCharting %s returned %s", path, response.status)
+                        return None
+                    payload = await response.json(content_type=None)
+                    break
+            except Exception as exc:  # a slow third party must never fail a scan
+                if isinstance(exc, asyncio.TimeoutError) and attempt < self._retries:
+                    log.info("PriceCharting %s timed out — retrying", path)
+                    continue
+                log.info("PriceCharting %s failed: %r", path, exc)
+                return None
+        if payload is None:
             return None
 
         if payload.get("status") != "success":
@@ -182,24 +293,32 @@ class PriceChartingClient:
         language: str | None = None,
         parallel_name: str | None = None,
     ) -> Valuation | None:
+        self.last_miss = None
         query = build_query(name, number, release, language)
         payload = await self._get("/products", {"q": query})
         if payload is None:
+            self.last_miss = "PriceCharting did not answer"
             return None
 
-        product = choose_product(payload.get("products") or [], number, parallel_name)
+        product = choose_product(payload.get("products") or [], number, parallel_name, release, language)
         if product is None:
             log.info("PriceCharting: no unambiguous match for %r", query)
+            self.last_miss = "no single PriceCharting product matches"
             return None
 
         # The list endpoint returns identity only; prices need the product call.
         detail = await self._get("/product", {"id": str(product.get("id"))})
         if detail is None:
+            self.last_miss = "PriceCharting did not answer"
             return None
 
         value = price_from(detail, "loose-price")
         if value is None:
             log.info("PriceCharting: no ungraded price for %r", detail.get("product-name"))
+            self.last_miss = (
+                f"PriceCharting lists {detail.get('product-name')} ({detail.get('console-name')}) "
+                "but has no ungraded price for it"
+            )
             return None
 
         return Valuation(
