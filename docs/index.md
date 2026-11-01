@@ -25,6 +25,7 @@ connect, so refreshing the browser source mid-pack loses nothing.
 - [Setup](guides/setup.md) — get a key, run it, point the phone and OBS at it.
 - [Stream-night runbook](guides/runbook.md) — the loop you actually follow on air.
 - [The multichat giveaway loop](guides/giveaway-loop.md) — wiring draws to packs and packs back to the ledger.
+- [Pricing a recorded opening](guides/video-pricing.md) — video in, per-card timestamps, prices and a running total out (CSV/SRT) for editing shorts.
 - [NixOS module](reference/nixos-module.md) — deploying it as a service.
 - [HTTP API](reference/http-api.md) — every endpoint.
 - [How prices are calculated](reference/pricing.md) — and why they are what they are.
