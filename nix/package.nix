@@ -2,6 +2,7 @@
   lib,
   python3Packages,
   ffmpeg-headless,
+  dejavu_fonts,
 }:
 python3Packages.buildPythonApplication {
   pname = "chat-cards";
@@ -23,7 +24,16 @@ python3Packages.buildPythonApplication {
 
   # chat-cards-video shells out to ffmpeg/ffprobe; pin them so the installed
   # command works without ffmpeg on the user's PATH.
-  makeWrapperArgs = ["--prefix" "PATH" ":" (lib.makeBinPath [ffmpeg-headless])];
+  # chat-cards-overlay draws text, so it gets a known bold font too.
+  makeWrapperArgs = [
+    "--prefix"
+    "PATH"
+    ":"
+    (lib.makeBinPath [ffmpeg-headless])
+    "--set-default"
+    "CHAT_CARDS_FONT"
+    "${dejavu_fonts}/share/fonts/truetype/DejaVuSans-Bold.ttf"
+  ];
 
   pythonImportsCheck = ["chat_cards"];
   doCheck = false;

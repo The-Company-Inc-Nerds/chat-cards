@@ -122,6 +122,58 @@ The CSV is rewritten in place, and the previous version is kept as `.bak`. `-o`
 writes the result to a different file instead. The running totals, the `TOTAL`
 row and the `--srt` subtitles are all rebuilt.
 
+## A "+ $price" overlay for the edit
+
+Once the CSV is right, `price-overlay` turns it into a transparent video. At
+each card's timestamp, its price pops up in green, for example **+ $0.10**. It
+hops randomly left or right and fades out as it lands.
+
+```sh
+price-overlay opening.prices.csv --like opening.mp4 --seed 1
+```
+
+- **Output:** `opening.prices.overlay.mov`, ProRes 4444 with transparency. It
+  imports into Premiere, Resolve, Final Cut and CapCut desktop. Use
+  `-o pops.webm` for a much smaller VP9 file with transparency, for browsers
+  and OBS.
+- **`--like`:** copies the clip's size, frame rate and length. Put the overlay
+  on a track above the clip, starting at 0:00, and every callout lands on its
+  card.
+- **Seed:** `--seed` keeps the hop directions the same between renders. If you
+  fix one price and re-render, the other cards hop the same way as before.
+- **Input:** only the `timestamp` (or `seconds`) and `price` columns are used, so
+  a hand-made CSV works too.
+
+### One number at a time, to cut up yourself
+
+```sh
+price-overlay opening.prices.csv --like opening.mp4 --seed 1 --spaced
+```
+
+`--spaced` ignores the card timestamps. It puts the callouts one after another,
+in CSV order, with `--gap` seconds of empty video between them (default 2).
+Only one number is ever on screen, and each one is easy to find and cut out on
+the timeline. It also writes `opening.prices.overlay-spaced.cues.csv`, which
+lists:
+
+- each callout's start and end in the overlay
+- the price
+- when that card appears in your clip
+
+That tells you where to drop each piece.
+
+| Option | Default | What it does |
+|---|---|---|
+| `--spaced` | off | One callout at a time with gaps, instead of synced to the clip |
+| `--gap` | `2` | With `--spaced`: empty seconds between callouts |
+| `--hop` | `1.2` | Seconds each callout stays on screen |
+| `--offset` | `0` | Shift every callout, e.g. `-0.2` to land just before the reveal |
+| `--position` | `0.5,0.45` | Where callouts start, as x,y fractions of the frame |
+| `--font-scale` | `0.065` | Text height as a fraction of frame height |
+| `--color` | `0x2BD94A` | Text colour |
+| `--min-price` | `0` | Skip cards worth less than this |
+| `--font` | DejaVu Sans Bold | Font file (or set `$CHAT_CARDS_FONT`) |
+
 ## Prices
 
 Prices are worked out the same way as on stream (see

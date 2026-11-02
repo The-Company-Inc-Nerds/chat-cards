@@ -12,6 +12,7 @@ dependencies = ["aiohttp>=3.9"]
 [project.scripts]
 chat-cards = "chat_cards.__main__:main"
 chat-cards-video = "chat_cards.video:main"
+chat-cards-overlay = "chat_cards.overlay:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
