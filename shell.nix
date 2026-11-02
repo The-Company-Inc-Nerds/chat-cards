@@ -151,6 +151,25 @@
   '';
 
   # ---------------------------------------------------------------------------
+  # price-overlay — render a transparent "+ $0.10" hop-and-fade overlay video
+  # from a price-video CSV, to lay over the clip in an editor.
+  # ---------------------------------------------------------------------------
+  price-overlay = pkgs.writeShellScriptBin "price-overlay" ''
+    set -euo pipefail
+    root="$PWD"
+    while [ "$root" != "/" ] && [ ! -d "$root/src/chat_cards" ]; do
+      root="$(dirname "$root")"
+    done
+    if [ ! -d "$root/src/chat_cards" ]; then
+      echo "price-overlay: run this from inside the chat-cards repo" >&2
+      exit 1
+    fi
+    PATH="${pkgs.ffmpeg-headless}/bin:$PATH" \
+      CHAT_CARDS_FONT="''${CHAT_CARDS_FONT:-${pkgs.dejavu_fonts}/share/fonts/truetype/DejaVuSans-Bold.ttf}" \
+      PYTHONPATH="$root/src" exec ${pythonEnv}/bin/python3 -m chat_cards.overlay "$@"
+  '';
+
+  # ---------------------------------------------------------------------------
   # gcommit — the signed-commit workflow.
   #
   # Commits and tags in this repo are cryptographically *signed* by a human key.
@@ -294,6 +313,7 @@ in
       pythonEnv
       serve
       price-video
+      price-overlay
       gcommit
       build-wiki
       publish-wiki
@@ -311,5 +331,6 @@ in
       echo "  serve --key KEY        run live against the CardSight API"
       echo "  serve --help           key-file, port and pass-through options"
       echo "  price-video CLIP -n 10 price every card in a pack-opening video -> CSV"
+      echo "  price-overlay CSV      transparent '+ \$price' overlay video from that CSV"
     '';
   }

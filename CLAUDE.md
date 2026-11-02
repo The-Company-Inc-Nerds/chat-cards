@@ -49,8 +49,13 @@ total. `--mock` rehearses offline, and `--at` takes explicit timestamps.
 `--reprice CSV` re-reads a hand-corrected CSV and reprices it with
 PriceCharting alone, with no video and no CardSight calls. Each row is priced
 from its name, number, set and language columns, and
-`price_source=manual` rows are kept as they are. The
-pure helpers are unit-tested in `tests/test_video.py`.
+`price_source=manual` rows are kept as they are. `chat_cards/overlay.py` (`price-overlay` in the dev shell,
+`chat-cards-overlay` when installed) renders that CSV as a transparent overlay
+video. At each card's timestamp, a green "+ $price" hops left or right and fades.
+It uses one ffmpeg `drawtext` per card and outputs ProRes 4444 `.mov` or VP9
+`.webm`. `--spaced` instead lays the callouts end to end with `--gap` seconds
+between them, for cutting by hand, and writes a `.cues.csv`. The pure helpers are unit-tested in `tests/test_video.py` and
+`tests/test_overlay.py`.
 `docs/guides/video-pricing.md` is the user-facing guide.
 
 ## Giveaway integration (multichat)
