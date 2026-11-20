@@ -41,6 +41,10 @@ def main() -> None:
         port=config.port,
         ssl_context=ssl_context(config),
         print=None,
+        # How long a request still in flight gets to finish when the service is
+        # stopped. The default is a minute, which is a minute of no overlay on
+        # every restart that catches a slow client.
+        shutdown_timeout=5.0,
     )
 
 

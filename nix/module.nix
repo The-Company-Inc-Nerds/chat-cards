@@ -273,8 +273,21 @@ in {
     systemd.services.chat-cards = {
       description = "chat-cards scanner and Twitch overlay";
       wantedBy = ["multi-user.target"];
-      after = ["network-online.target"];
-      wants = ["network-online.target"];
+      # Not network-online.target. The app binds its port without a network
+      # and keeps asking for its upstreams by itself, and the overlay is local.
+      # Waiting to be "online" holds the start for as long as the host's
+      # wait-online unit takes to give up — a minute, on a NetworkManager box
+      # that boots during an outage — with nothing listening meanwhile.
+      after = ["network.target"];
+
+      # Never rate-limit restarts. systemd's default (5 starts in 10 s) sits
+      # exactly on this unit's 2 s restart interval: left alone it squeaks
+      # under, but one more start job inside the window — a `systemctl
+      # restart`, a `nixos-rebuild switch`, a secrets unit bouncing its
+      # consumers — is a sixth start and parks the unit in `failed`, where
+      # Restart= no longer applies and nothing brings it back. Must live at the
+      # unit ([Unit]) level, not serviceConfig.
+      startLimitIntervalSec = 0;
 
       serviceConfig = {
         ExecStart = lib.escapeShellArgs (
@@ -326,8 +339,22 @@ in {
         StateDirectoryMode = "0700";
 
         DynamicUser = true;
-        Restart = "on-failure";
+        # `always`, not `on-failure`: the overlay and the pack endpoint are
+        # meant to be there for as long as the host is up, whatever the reason
+        # the process went away. `systemctl stop` still stops it.
+        Restart = "always";
         RestartSec = 2;
+        # Retries are unlimited (startLimitIntervalSec above), so space them
+        # out: a start that keeps failing — typically a LoadCredential file
+        # that is not there yet, which fails before the app even runs — goes
+        # from every 2 s to every 10 s over five steps instead of logging a
+        # failure every 2 s for as long as it takes. No longer than that,
+        # because systemd only resets the count on a start job: after five
+        # automatic restarts, however long ago, a crash mid-stream waits the
+        # full delay with the overlay gone. mkDefault, so a host that orders
+        # the unit after its secrets can pick its own pace.
+        RestartSteps = lib.mkDefault 5;
+        RestartMaxDelaySec = lib.mkDefault 10;
 
         # Hardening. This service talks to one HTTPS API and writes one directory.
         AmbientCapabilities = [];

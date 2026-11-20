@@ -9,7 +9,7 @@ import ssl
 from pathlib import Path
 from typing import Any
 
-from aiohttp import WSMsgType, web
+from aiohttp import WSCloseCode, WSMsgType, web
 
 from .cardsight import CardSightClient, CardSightError, MAX_UPLOAD_BYTES, Valuation
 from .config import Config
@@ -22,6 +22,7 @@ from .state import (
     STATUS_PRICED,
     STATUS_UNMATCHED,
     Store,
+    write_atomic,
 )
 
 log = logging.getLogger(__name__)
@@ -40,6 +41,21 @@ EXTENSIONS = {
     "image/heic": ".heic",
 }
 CONTENT_TYPES = {v: k for k, v in EXTENSIONS.items()}
+
+# Seconds between startup-check attempts while an upstream cannot be reached; the
+# last one repeats. A box that boots ahead of its uplink is seconds from an
+# answer and a real outage is not, so the pace drops to one request every five
+# minutes: PriceCharting threatens to suspend accounts that hammer it.
+CHECK_RETRY_DELAYS = (5.0, 15.0, 60.0, 300.0)
+
+# Seconds after the start before a scan the last process never identified is
+# given up on. The overlay and the phone are back within a second or so of the
+# port opening, and the phone only says "scan that card again" when it sees the
+# card go: dropped any sooner, it would vanish from the list without a word.
+INTERRUPTED_SCAN_GRACE = 5.0
+
+# Seconds the WebSockets get to take their close frame when the service stops.
+SOCKET_CLOSE_TIMEOUT = 2.0
 
 
 def _safe_id(value: str) -> bool:
@@ -88,8 +104,25 @@ def _with_token_cookie(request: web.Request, response: web.StreamResponse) -> we
 # ---------------------------------------------------------------------- enrichment
 
 
+def _spawn(app: web.Application, coroutine: Any) -> asyncio.Task:
+    """Run a coroutine in the background, cancelled with the app."""
+    task = asyncio.create_task(coroutine)
+    app["tasks"].add(task)
+    task.add_done_callback(app["tasks"].discard)
+    return task
+
+
 def _cached_image(directory: Path, key: str) -> Path | None:
-    return next(iter(sorted(directory.glob(f"{key}.*"))), None)
+    """The cached art for a card, if there is a usable file.
+
+    An empty file is not one. A cache written before a power cut can come back
+    zero-length, and serving it would blank that card's art for good — the
+    entry is never refetched once it counts as present.
+    """
+    for path in sorted(directory.glob(f"{key}.*")):
+        if path.suffix in CONTENT_TYPES and path.stat().st_size > 0:
+            return path
+    return None
 
 
 async def _cache_catalog_image(app: web.Application, card_id: str) -> bool:
@@ -111,9 +144,23 @@ async def _cache_catalog_image(app: web.Application, card_id: str) -> bool:
         log.info("No catalog image for %s: %s", card_id, exc)
         return False
 
+    if not data:
+        log.info("No catalog image for %s: empty response", card_id)
+        return False
+
     extension = EXTENSIONS.get(content_type.split(";")[0].strip(), ".jpg")
-    (directory / f"{card_id}{extension}").write_bytes(data)
+    write_atomic(directory / f"{card_id}{extension}", data)
     return True
+
+
+async def _fail_card(
+    app: web.Application, uid: str, reason: str, status: str = STATUS_ERROR
+) -> None:
+    """Give up on a scan: drop it, or keep it flagged, as the operator configured."""
+    if app["config"].auto_delete_unmatched:
+        await app["store"].remove_card(uid, event="card_failed", reason=reason)
+    else:
+        await app["store"].update_card(uid, status=status, error=reason)
 
 
 async def enrich_card(app: web.Application, uid: str, image: bytes, content_type: str) -> None:
@@ -124,23 +171,16 @@ async def enrich_card(app: web.Application, uid: str, image: bytes, content_type
     rather than a spinner.
     """
     store: Store = app["store"]
-    config: Config = app["config"]
     client = app["client"]
-
-    async def failed(reason: str, status: str = STATUS_ERROR) -> None:
-        if config.auto_delete_unmatched:
-            await store.remove_card(uid, event="card_failed", reason=reason)
-        else:
-            await store.update_card(uid, status=status, error=reason)
 
     try:
         identification = await client.identify(image, content_type)
     except CardSightError as exc:
-        await failed(str(exc))
+        await _fail_card(app, uid, str(exc))
         return
     except Exception as exc:  # network blips must not kill the task silently
         log.exception("identify failed for %s", uid)
-        await failed(str(exc))
+        await _fail_card(app, uid, str(exc))
         return
 
     card = store.card(uid)
@@ -176,7 +216,7 @@ async def enrich_card(app: web.Application, uid: str, image: bytes, content_type
 
     if not identification.exact:
         detail = identification.messages[0] if identification.messages else "No catalog match"
-        await failed(detail, STATUS_UNMATCHED)
+        await _fail_card(app, uid, detail, STATUS_UNMATCHED)
         return
 
     await store.update_card(
@@ -288,8 +328,9 @@ async def healthz(request: web.Request) -> web.Response:
             "ok": True,
             "mock": request.app["config"].mock,
             "cardsight_key": bool(request.app["client"].configured),
-            "cardsight_auth": request.app.get("auth_ok"),
-            "pricecharting": request.app.get("pricecharting_ok"),
+            # cardsight_auth, pricecharting and checks: filled in by the startup
+            # checks as they finish, after the server is already answering.
+            **request.app["health"],
         }
     )
 
@@ -301,6 +342,7 @@ async def get_state(request: web.Request) -> web.Response:
 async def websocket(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse(heartbeat=25)
     await ws.prepare(request)
+    request.app["sockets"].add(ws)
 
     store: Store = request.app["store"]
     queue = store.subscribe()
@@ -320,6 +362,7 @@ async def websocket(request: web.Request) -> web.WebSocketResponse:
     finally:
         pump_task.cancel()
         store.unsubscribe(queue)
+        request.app["sockets"].discard(ws)
     return ws
 
 
@@ -354,12 +397,10 @@ async def post_scan(request: web.Request) -> web.Response:
     # Keep the producer's photo: it is the fallback artwork when the catalog has
     # none, and the visual record of what was actually scanned.
     config.capture_dir.mkdir(parents=True, exist_ok=True)
-    (config.capture_dir / f"{card.uid}.bin").write_bytes(image)
+    write_atomic(config.capture_dir / f"{card.uid}.bin", image)
     await store.update_card(card.uid, has_capture=True, capture_type=content_type)
 
-    task = asyncio.create_task(enrich_card(request.app, card.uid, image, content_type))
-    request.app["tasks"].add(task)
-    task.add_done_callback(request.app["tasks"].discard)
+    _spawn(request.app, enrich_card(request.app, card.uid, image, content_type))
     return web.json_response({"uid": card.uid, "seq": card.seq})
 
 
@@ -427,9 +468,7 @@ async def patch_card(request: web.Request) -> web.Response:
         raise web.HTTPNotFound(text="no such card")
 
     if reprice_id:
-        task = asyncio.create_task(price_card(request.app, uid, reprice_id, None))
-        request.app["tasks"].add(task)
-        task.add_done_callback(request.app["tasks"].discard)
+        _spawn(request.app, price_card(request.app, uid, reprice_id, None))
 
     return web.json_response(card.to_json())
 
@@ -466,7 +505,7 @@ async def get_card_image(request: web.Request) -> web.StreamResponse:
 
     if card.has_capture:
         path = config.capture_dir / f"{card.uid}.bin"
-        if path.exists():
+        if path.exists() and path.stat().st_size > 0:
             return web.FileResponse(path, headers={**headers, "Content-Type": card.capture_type})
 
     raise web.HTTPNotFound()
@@ -486,27 +525,163 @@ async def get_search(request: web.Request) -> web.Response:
 # ----------------------------------------------------------------------- assembly
 
 
+async def _verdict(name: str, check: Any) -> bool | None:
+    """One upstream's answer to its check; None when there was none to be had.
+
+    Neither client is meant to raise from its check. One that does anyway gets
+    the same treatment as one that could not be reached: asked again later,
+    without costing the other upstream its own check.
+    """
+    try:
+        return await check()
+    except Exception:
+        log.exception("The %s check failed unexpectedly — will ask again", name)
+        return None
+
+
+async def _check_upstreams_once(app: web.Application) -> bool:
+    """Ask each upstream that has not given a verdict yet. True when none is left."""
+    health: dict[str, Any] = app["health"]
+    settled = True
+
+    pricecharting = app.get("pricecharting")
+    if pricecharting is not None and pricecharting.configured and health["pricecharting"] is None:
+        health["pricecharting"] = await _verdict("PriceCharting", pricecharting.health)
+        if health["pricecharting"] is None:
+            settled = False
+            log.warning("Could not reach PriceCharting to verify the token — will ask again")
+        elif health["pricecharting"]:
+            log.info("PriceCharting token verified")
+        else:
+            log.error(
+                "PriceCharting token did not return price data — check the "
+                "subscription covers Pokemon cards. Falling back to CardSight pricing."
+            )
+
+    client = app["client"]
+    if client.configured and health["cardsight_auth"] is None:
+        health["cardsight_auth"] = await _verdict("CardSight", client.health_auth)
+        if health["cardsight_auth"] is None:
+            settled = False
+        elif health["cardsight_auth"]:
+            if not app["config"].mock:  # the stand-in client has no key to verify
+                log.info("CardSight API key verified")
+        else:
+            log.error("CardSight rejected the API key — scans will fail until it is fixed")
+
+    # A verdict, good or bad, means an API could be asked: the uplink is there.
+    # With nobody left to ask there is nothing to wait for either.
+    if settled or health["pricecharting"] is not None or health["cardsight_auth"] is not None:
+        app["upstream_reached"].set()
+    return settled
+
+
+async def _check_upstreams(app: web.Application) -> None:
+    """Verify the CardSight key and the PriceCharting token, off the startup path.
+
+    Nothing the server does at start needs either upstream: the overlay, the
+    scanner page and the pack endpoint are all local. Checking in the
+    foreground kept the port closed for as long as an API took to answer, and
+    took the process down with it when it never did — on a box that boots
+    before its uplink, that is every boot.
+
+    A verdict is final; "could not ask" is not, so that one is asked again until
+    it becomes a verdict. Otherwise /healthz would keep reporting an unverified
+    key for as long as the process lived after one offline start.
+    """
+    health: dict[str, Any] = app["health"]
+    attempt = 0
+    try:
+        while not await _check_upstreams_once(app):
+            await asyncio.sleep(CHECK_RETRY_DELAYS[min(attempt, len(CHECK_RETRY_DELAYS) - 1)])
+            attempt += 1
+    except Exception:  # advisory: whatever goes wrong here, the server keeps serving
+        log.exception("Startup checks failed unexpectedly — carrying on without them")
+    finally:
+        health["checks"] = "done"
+        # Nobody is going to ask again, so nothing may go on waiting for an answer.
+        app["upstream_reached"].set()
+
+
+def _settle_unfinished(app: web.Application) -> None:
+    """Deal with the cards the previous process died holding.
+
+    Nothing is working on them, so left alone they would sit on the reel as
+    "Identifying…" until someone deleted each one by hand.
+
+    A card that was never identified is failed, not sent again. Identification
+    is the billed call: resubmitting on every start would spend credits with
+    nobody watching — possibly for a scan CardSight already charged for, and
+    again on each restart of a box that is power-cycling. Its photo stays in
+    captures/ and the producer re-scans.
+
+    A card that had been identified keeps its identity and only has its price
+    looked up again: the billed part is done, and the lookup is the one the
+    scan was owed anyway. It ends priced or marked unavailable either way.
+
+    Both happen in the background. This is called before the port is bound,
+    and nothing here is worth keeping it closed for — least of all a state
+    file that cannot be written, which would end the start, and every start
+    after it.
+    """
+    store: Store = app["store"]
+    interrupted: list[str] = []
+    for card in store.unfinished_cards():
+        if card.card_id:
+            log.info("Resuming pricing for card %s, interrupted by a restart", card.uid)
+            _spawn(app, _resume_pricing(app, card.uid))
+        else:
+            log.warning("Scan %s was interrupted by a restart before it was identified", card.uid)
+            interrupted.append(card.uid)
+    if interrupted:
+        _spawn(app, _fail_interrupted(app, interrupted))
+
+
+async def _fail_interrupted(app: web.Application, uids: list[str]) -> None:
+    """Give up on the scans a restart cut short, once the pages are back to be told."""
+    await asyncio.sleep(INTERRUPTED_SCAN_GRACE)
+    for uid in uids:
+        card = app["store"].card(uid)
+        if card is None or card.status != STATUS_IDENTIFYING or card.card_id:
+            continue  # deleted or corrected by hand in the meantime
+        try:
+            await _fail_card(app, uid, "Interrupted by a restart — scan this card again")
+        except Exception:
+            # The state file could not be written — a full disk, most likely.
+            # The card is settled in memory all the same, and on disk by the
+            # next change that can be written; failing that, by the next start.
+            log.exception("Could not record that scan %s was interrupted", uid)
+
+
+async def _resume_pricing(app: web.Application, uid: str) -> None:
+    """Price a card the previous process had identified but not priced.
+
+    Not before one of the upstreams has answered its startup check. Straight
+    away is within a second of the start, and on a box that boots ahead of its
+    uplink the lookup fails there and then — which price_card settles as
+    $0.00, "Pricing unavailable", on the overlay and in the pack total reported
+    to multichat, seconds before the lookup would have worked.
+    """
+    await app["upstream_reached"].wait()
+    # Corrected or priced by hand while this waited: the operator's word stands.
+    card = app["store"].card(uid)
+    if card is not None and card.status == STATUS_IDENTIFYING and card.card_id:
+        await price_card(app, uid, card.card_id, card.parallel_id)
+
+
 async def _on_startup(app: web.Application) -> None:
+    # Nothing in here may wait on the network: the port is bound only once this
+    # returns, and the overlay and the pack endpoint have to be up regardless.
     await app["client"].start()
     pricecharting = app.get("pricecharting")
     if pricecharting is not None:
         await pricecharting.start()
-        if pricecharting.configured:
-            app["pricecharting_ok"] = await pricecharting.health()
-            if not app["pricecharting_ok"]:
-                log.error(
-                    "PriceCharting token did not return price data — check the "
-                    "subscription covers Pokemon cards. Falling back to CardSight pricing."
-                )
-        else:
+        if not pricecharting.configured:
             log.info("No PriceCharting token — using CardSight pricing only.")
-    if app["client"].configured:
-        app["auth_ok"] = await app["client"].health_auth()
-        if app["auth_ok"] is False:
-            log.error("CardSight rejected the API key — scans will fail until it is fixed")
-    else:
-        app["auth_ok"] = None
+    if not app["client"].configured:
         log.warning("No CardSight API key configured. Start with --mock to rehearse offline.")
+
+    _settle_unfinished(app)
 
     # Report pack summaries to multichat when a URL is configured. Runs in mock
     # mode too, so the whole giveaway → pack → ledger loop can be rehearsed offline.
@@ -516,6 +691,33 @@ async def _on_startup(app: web.Application) -> None:
         await reporter.start()
         app["reporter"] = reporter
         log.info("Reporting pack summaries to %s", config.report_url)
+
+    _spawn(app, _check_upstreams(app))
+
+
+async def _on_shutdown(app: web.Application) -> None:
+    """Hang up on the overlay and the phone so a restart is over in a moment.
+
+    A WebSocket is a request that never finishes, and on the way down aiohttp
+    waits for unfinished requests. With OBS connected — which on a stream box
+    is always — every restart of the service spent most of a minute stopping.
+    Both pages reconnect by themselves.
+
+    Bounded, because a client that has stopped reading — a frozen browser
+    source, a phone that walked out of Wi-Fi range — never takes the close
+    frame, and this hook runs before any of aiohttp's own shutdown timeouts
+    apply: waiting for that client would hold the stop until systemd killed
+    the process. Its connection is cut with the rest a few seconds later.
+    """
+    sockets = list(app["sockets"])
+    closing = asyncio.gather(
+        *(ws.close(code=WSCloseCode.GOING_AWAY, message=b"restarting") for ws in sockets),
+        return_exceptions=True,
+    )
+    try:
+        await asyncio.wait_for(closing, SOCKET_CLOSE_TIMEOUT)
+    except asyncio.TimeoutError:
+        log.info("A WebSocket client did not take the close in time — dropping it")
 
 
 async def _on_cleanup(app: web.Application) -> None:
@@ -542,10 +744,18 @@ def create_app(config: Config) -> web.Application:
     app["config"] = config
     app["store"] = store
     app["price_cache"] = {}
+    # What /healthz reports beyond the static facts. A dict rather than app keys
+    # because the startup checks fill it in long after the app is frozen.
+    app["health"] = {"cardsight_auth": None, "pricecharting": None, "checks": "pending"}
     # Set in _on_startup when config.report_url is configured (needs the loop).
     app["reporter"] = None
     # Strong refs: asyncio only holds weak ones, and a collected task stops mid-scan.
     app["tasks"] = set()
+    # Open WebSockets, so shutdown can close them rather than wait them out.
+    app["sockets"] = set()
+    # Set once an upstream has answered its startup check — there is a way out
+    # of the box — or there is none left to ask.
+    app["upstream_reached"] = asyncio.Event()
     # Skipped entirely in mock mode: rehearsal must not reach the network.
     app["pricecharting"] = (
         None if config.mock else PriceChartingClient(config.pricecharting_token)
@@ -577,6 +787,7 @@ def create_app(config: Config) -> web.Application:
     )
 
     app.on_startup.append(_on_startup)
+    app.on_shutdown.append(_on_shutdown)
     app.on_cleanup.append(_on_cleanup)
     return app
 

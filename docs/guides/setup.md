@@ -62,13 +62,29 @@ Check it came up, and that the key is good:
 
 ```bash
 curl -s http://localhost:8787/healthz
-# {"ok": true, "mock": false, "cardsight_key": true, "cardsight_auth": true}
+# {"ok": true, "mock": false, "cardsight_key": true, "cardsight_auth": true,
+#  "pricecharting": null, "checks": "done"}
 ```
+
+The server answers as soon as it has started — it does not wait for the
+internet. The overlay, the scanner page and `POST /api/pack` need no upstream at
+all, so they are up within a second even when CardSight cannot be reached; the
+key and token are verified in the background and `/healthz` fills in as the
+answers arrive.
 
 `cardsight_auth` is three-valued: `true` (key verified), `false` (the API
 actively rejected it — fix that before going live, every scan will fail), and
-`null` (the check could not be made, e.g. the network was down at startup, which
-is not itself a problem).
+`null` (no verdict: there is no key, or the API has not been reached yet).
+
+`checks` says whether a `null` is final. While it is `"pending"` the server is
+still asking — straight away at start, then after 5 s, 15 s, a minute, and
+every five minutes from there for as long as an API stays out of reach — so a
+box that boots before its uplink verifies its key by itself once the network is
+there. `"done"` means every configured credential has a verdict (or there was
+nothing to check). A rejected key is a verdict and is not asked about again:
+restart the service after replacing it. An answer that is not the API's own —
+a captive portal's page, a proxy's error — is not a verdict, and is asked
+about again like no answer at all.
 
 ## 1b. Get a PriceCharting token
 
@@ -91,7 +107,8 @@ serve --key-file /run/secrets/cardsight-api-key \
 Without it the app still runs, using CardSight's completed-sales ladder alone —
 which has no data at all for Japanese prints. `/healthz` reports
 `"pricecharting": true` once the token returns price data, `false` if the
-subscription does not cover it, and `null` when no token is set.
+subscription does not cover it, and `null` when no token is set — or, while
+`checks` is still `"pending"`, when PriceCharting has not been reached yet.
 
 ## 2b. Preflight the key
 
