@@ -1,17 +1,25 @@
-"""Tests for PriceCharting query building and product choice (no network).
+"""Tests for PriceCharting query building, product choice and the token check (no network).
 
     PYTHONPATH=src python -m unittest discover -s tests
 """
 
 from __future__ import annotations
 
+import asyncio
 import pathlib
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
+from aiohttp import web  # noqa: E402
+
+from _support import Upstream  # noqa: E402
+from chat_cards import pricecharting  # noqa: E402
 from chat_cards.pricecharting import (  # noqa: E402
+    PriceChartingClient,
     build_query,
     choose_product,
     language_code,
@@ -79,6 +87,44 @@ class ChooseTests(unittest.TestCase):
         products = [product("Morpeko #52", "Pokemon Japanese 30th Celebration"),
                     product("Morpeko #110", "Pokemon Japanese 30th Celebration")]
         self.assertIsNone(choose_product(products, None, None, "30th Celebration", "ja"))
+
+
+class HealthTests(unittest.TestCase):
+    """health() against a loopback stand-in: a bad token and no answer are different things."""
+
+    def verdict(self, status: int | None, payload: dict | None = None) -> bool | None:
+        async def run() -> bool | None:
+            async def respond(_request: web.Request) -> web.Response:
+                return web.json_response(payload or {}, status=status)
+
+            upstream = Upstream(respond)
+            if status is not None:
+                await upstream.up()
+            client = PriceChartingClient("token", rate_limit=0)
+            await client.start()
+            try:
+                with mock.patch.object(pricecharting, "BASE_URL", upstream.url):
+                    return await client.health()
+            finally:
+                await client.close()
+                await upstream.down()
+
+        return asyncio.run(run())
+
+    def test_price_data_means_the_token_works(self) -> None:
+        self.assertIs(self.verdict(200, {"status": "success", "loose-price": 1732}), True)
+
+    def test_identity_without_a_price_is_a_token_with_no_entitlement(self) -> None:
+        self.assertIs(self.verdict(200, {"status": "success", "product-name": "Charizard #4"}), False)
+
+    def test_a_refused_token_is_a_verdict(self) -> None:
+        self.assertIs(self.verdict(200, {"status": "error", "error-message": "bad token"}), False)
+        self.assertIs(self.verdict(403), False)
+
+    def test_no_answer_is_not_a_verdict(self) -> None:
+        self.assertIsNone(self.verdict(None))  # connection refused
+        self.assertIsNone(self.verdict(503))
+        self.assertIsNone(self.verdict(429))
 
 
 if __name__ == "__main__":

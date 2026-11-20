@@ -47,6 +47,8 @@
 
       # Boots the module in mock mode and drives the real HTTP surface, so a
       # broken unit or a bad hardening flag fails here rather than mid-stream.
+      # Also the only place the unit's restart behaviour and the resend to
+      # multichat are exercised under the unit's own sandbox.
       module = pkgs.testers.runNixOSTest {
         name = "chat-cards-module";
         nodes.machine = {pkgs, ...}: {
@@ -99,19 +101,26 @@
           machine.wait_for_open_port(8787)
 
           machine.succeed("curl -sf http://localhost:8787/healthz | grep '\"ok\": true'")
-          machine.succeed("curl -sf http://localhost:8787/overlay | grep -q 'reel__track'")
-          machine.succeed("curl -sf http://localhost:8787/scan | grep -q 'viewfinder'")
+          # The credential checks run after the port is open, so give them a beat.
+          machine.wait_until_succeeds(
+              "curl -sf http://localhost:8787/healthz | grep '\"checks\": \"done\"'"
+          )
+          # grep -c, not -q: -q quits at the first match, and on a slow builder
+          # curl is still writing the rest of the page into the closed pipe,
+          # which fails the pipeline although the page was served.
+          machine.succeed("curl -sf http://localhost:8787/overlay | grep -c 'reel__track'")
+          machine.succeed("curl -sf http://localhost:8787/scan | grep -c 'viewfinder'")
 
           # Open a pack, then confirm it survives a restart of the unit.
           machine.succeed(
               "curl -sf -X POST http://localhost:8787/api/pack "
               "-H 'Content-Type: application/json' -d '{\"size\": 5, \"winner\": \"@tester\"}'"
           )
-          machine.succeed("curl -sf http://localhost:8787/api/state | grep -q '@tester'")
+          machine.succeed("curl -sf http://localhost:8787/api/state | grep -c '@tester'")
 
           machine.systemctl("restart chat-cards.service")
           machine.wait_for_open_port(8787)
-          machine.succeed("curl -sf http://localhost:8787/api/state | grep -q '@tester'")
+          machine.succeed("curl -sf http://localhost:8787/api/state | grep -c '@tester'")
 
           # State must land in the StateDirectory, not somewhere ProtectSystem allows by luck.
           machine.succeed("test -f /var/lib/chat-cards/session.json")
@@ -135,6 +144,33 @@
           assert report["body"]["packId"], report
           # No report.tokenFile configured, so nothing must be sent as a bearer.
           assert report["auth"] is None, report
+
+          # A pack opened while multichat is away must still reach it: nothing
+          # else happens to this pack afterwards, so only the resend can deliver it.
+          machine.systemctl("stop fake-multichat.service")
+          machine.succeed(
+              "curl -sf -X POST http://localhost:8787/api/pack "
+              "-H 'Content-Type: application/json' "
+              "-d '{\"size\": 5, \"winner\": \"@missed\", \"ref\": \"turn-8\"}'"
+          )
+          machine.systemctl("start fake-multichat.service")
+          machine.wait_until_succeeds("grep -q 'turn-8' /var/log/turn-reports.jsonl")
+
+          # More start jobs in a row than systemd's default limit (5 in 10 s)
+          # allows. A unit that can be parked fails one of these outright.
+          for _ in range(8):
+              machine.succeed("systemctl restart chat-cards.service")
+          machine.wait_for_open_port(8787)
+          machine.succeed("curl -sf http://localhost:8787/api/state | grep -c '@missed'")
+
+          # Restart=always: the service comes back after a clean exit too.
+          pid = "systemctl show -p MainPID --value chat-cards.service"
+          before = machine.succeed(pid).strip()
+          machine.succeed("systemctl kill --signal=TERM chat-cards.service")
+          machine.wait_until_succeeds(
+              f'test "$({pid})" -gt 0 && test "$({pid})" != {before} '
+              "&& curl -sf http://localhost:8787/healthz"
+          )
         '';
       };
     };

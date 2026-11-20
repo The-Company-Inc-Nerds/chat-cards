@@ -3,6 +3,8 @@
 ## Before you go live
 
 1. `curl -s http://localhost:8787/healthz` — confirm `cardsight_auth: true`.
+   `null` with `"checks": "pending"` means CardSight has not been reached yet:
+   the overlay works, but scans will fail until the internet is back.
 2. Open `/scan` on the phone. The dot top-right should read **live**.
 3. Check the OBS browser source is showing the overlay, then
    `POST /api/session/reset` to clear last week's numbers:
@@ -82,7 +84,24 @@ overlay is deliberately not making that claim. See
 from the current state; nothing is lost.
 
 **The service restarts mid-pack.** Session state is on disk. The overlay
-reconnects on its own and the open pack is still open.
+reconnects on its own and the open pack is still open. A card that was caught
+mid-lookup is settled at start rather than left spinning: one that had already
+been identified keeps its name and art and gets its price looked up again; one
+that had not is dropped — scan it again. (With `autoDeleteUnmatched = false` it
+stays on the reel, marked "Interrupted by a restart".) A restart never
+re-submits a photo by itself, because identification is the billed call.
+
+**The internet drops.** The overlay, the totals and pack opening carry on —
+none of them leaves the box. Scans fail while it is down and are dropped like
+any other failed scan; re-scan once it is back. The service also starts fine
+without the internet, so a reboot during an outage still brings the overlay up.
+
+**The power goes out.** Same as a restart. Every change is forced to disk
+before it replaces the previous state, so the session comes back whole — at
+worst without the change that was being written as the power went. If the state
+file is ever unreadable anyway, the service starts an empty session and keeps
+the bad file next to it as `session.json.corrupt-<time>` instead of writing
+over it.
 
 ## After the stream
 

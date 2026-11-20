@@ -3,7 +3,7 @@
 The whole show is one Session. It holds an ordered list of Packs and an ordered
 list of Cards; every card belongs to at most one pack. State is written to disk on
 every mutation so an OBS refresh — or a service restart between packs — costs
-nothing.
+nothing, and written so that pulling the plug mid-write costs nothing either.
 """
 
 from __future__ import annotations
@@ -35,6 +35,28 @@ def _now() -> float:
 
 def _uid() -> str:
     return uuid.uuid4().hex[:12]
+
+
+def write_atomic(path: Path, data: bytes) -> None:
+    """Replace `path` with `data`, leaving the old file or the new one — never a torn one.
+
+    The data is forced to disk before the rename. Without that a filesystem may
+    commit the rename first, and a power cut in between leaves a zero-length
+    file under the real name: exactly the file a crash-safe write was meant to
+    prevent.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)  # atomic: readers never see a half-written file
+
+
+def quarantine_path(path: Path, now: float) -> Path:
+    """Where a state file that could not be read is moved aside to."""
+    stamp = time.strftime("%Y-%m-%dT%H-%M-%SZ", time.gmtime(now))
+    return path.with_name(f"{path.name}.corrupt-{stamp}")
 
 
 @dataclass
@@ -177,12 +199,25 @@ class Store:
             # A corrupt state file must never stop the service coming up mid-stream.
             log.error("Could not read %s (%s) — starting a fresh session", self._path, exc)
             self._session = Session()
+            self._quarantine()
+
+    def _quarantine(self) -> None:
+        """Move the unreadable state file out of the way of the next write.
+
+        Left in place it would be silently replaced by the first change to the
+        fresh session, and with it any chance of recovering the packs by hand.
+        """
+        aside = quarantine_path(self._path, _now())
+        try:
+            os.replace(self._path, aside)
+        except OSError as exc:
+            log.error("Could not move %s aside (%s) — the next change will overwrite it", self._path, exc)
+        else:
+            log.error("Kept the unreadable state file as %s", aside)
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(self._session.to_json(), indent=2), encoding="utf-8")
-        os.replace(tmp, self._path)  # atomic: readers never see a half-written file
+        write_atomic(self._path, json.dumps(self._session.to_json(), indent=2).encode("utf-8"))
 
     # ------------------------------------------------------------------ broadcast
 
@@ -223,6 +258,14 @@ class Store:
 
     def card(self, uid: str) -> Card | None:
         return next((c for c in self._session.cards if c.uid == uid), None)
+
+    def unfinished_cards(self) -> list[Card]:
+        """Cards whose lookup has not finished.
+
+        Straight after load() these are the ones the previous process died
+        holding: nothing is working on them any more.
+        """
+        return [c for c in self._session.cards if c.status == STATUS_IDENTIFYING]
 
     def snapshot(self) -> dict[str, Any]:
         cards = sorted(self._session.cards, key=lambda c: c.seq)
@@ -322,8 +365,9 @@ class Store:
                 return False
             self._session.cards.remove(card)
             # The event distinguishes an operator deleting a scan from the server
-            # dropping one, so the phone can say why a card vanished.
-            await self.commit(event, card_uid=uid, reason=reason)
+            # dropping one, so the phone can say why a card vanished. It names the
+            # pack because the card is no longer in the snapshot to look it up by.
+            await self.commit(event, card_uid=uid, pack_id=card.pack_id, reason=reason)
             return True
 
     async def reset(self) -> None:

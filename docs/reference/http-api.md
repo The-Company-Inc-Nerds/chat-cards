@@ -10,7 +10,27 @@ configured, pass it as `Authorization: Bearer <token>`, `?token=…`, or the
 |---|---|---|
 | `GET` | `/scan` | producer's scanner UI |
 | `GET` | `/overlay` | OBS browser source |
-| `GET` | `/healthz` | liveness plus CardSight key status; never requires a token |
+| `GET` | `/healthz` | liveness plus credential status; never requires a token |
+
+`/healthz` answers as soon as the server is listening, which is before either
+upstream API has been asked anything:
+
+```jsonc
+{
+  "ok": true,
+  "mock": false,
+  "cardsight_key": true,      // a key is configured
+  "cardsight_auth": true,     // true verified | false rejected | null no verdict
+  "pricecharting": null,      // true returns prices | false it does not | null no token, or no verdict
+  "checks": "done"            // "pending" while a credential is still being verified
+}
+```
+
+The two verdicts are filled in by a background check. A `null` next to
+`"checks": "pending"` means the API has not been reached yet and is being asked
+again (after 5 s, 15 s, a minute, then every five minutes); next to `"done"`
+it means there was nothing to verify. Treat `null` as "unknown", never as
+"bad" — only `false` is a rejection.
 
 ## State
 
@@ -27,7 +47,9 @@ it does not recognise.
 
 `card_failed` carries a `reason` and means the scan was dropped because the API
 could not identify it. The scanner turns that into a "scan it again" prompt;
-without it a vanishing row would look like nothing happened.
+without it a vanishing row would look like nothing happened. `card_failed` and
+`card_removed` frames also carry the `pack_id` the card belonged to, since the
+card itself is no longer in the snapshot.
 
 The snapshot:
 

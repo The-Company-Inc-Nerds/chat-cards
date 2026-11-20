@@ -276,6 +276,15 @@ in {
       after = ["network-online.target"];
       wants = ["network-online.target"];
 
+      # Never rate-limit restarts. systemd's default (5 starts in 10 s) sits
+      # exactly on this unit's 2 s restart interval: left alone it squeaks
+      # under, but one more start job inside the window — a `systemctl
+      # restart`, a `nixos-rebuild switch`, a secrets unit bouncing its
+      # consumers — is a sixth start and parks the unit in `failed`, where
+      # Restart= no longer applies and nothing brings it back. Must live at the
+      # unit ([Unit]) level, not serviceConfig.
+      startLimitIntervalSec = 0;
+
       serviceConfig = {
         ExecStart = lib.escapeShellArgs (
           [
@@ -326,8 +335,19 @@ in {
         StateDirectoryMode = "0700";
 
         DynamicUser = true;
-        Restart = "on-failure";
+        # `always`, not `on-failure`: the overlay and the pack endpoint are
+        # meant to be there for as long as the host is up, whatever the reason
+        # the process went away. `systemctl stop` still stops it.
+        Restart = "always";
         RestartSec = 2;
+        # Retries are unlimited (startLimitIntervalSec above), so space them
+        # out: a start that keeps failing — typically a LoadCredential file
+        # that is not there yet, which fails before the app even runs — goes
+        # from every 2 s to every 30 s over five steps instead of logging a
+        # failure every 2 s for as long as it takes. mkDefault, so a host that
+        # orders the unit after its secrets can pick its own pace.
+        RestartSteps = lib.mkDefault 5;
+        RestartMaxDelaySec = lib.mkDefault 30;
 
         # Hardening. This service talks to one HTTPS API and writes one directory.
         AmbientCapabilities = [];

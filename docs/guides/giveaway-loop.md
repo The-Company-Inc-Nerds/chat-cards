@@ -84,17 +84,43 @@ added, identified, priced, corrected or removed. Each one carries the pack's
 }
 ```
 
-multichat upserts by `packId`, so a dropped POST needs no retry — the next
-update reconciles it. That is also why prices settle a second or two after the
-cards appear: the first report goes out the moment a card is added, and the
+multichat upserts by `packId`, so sending a pack twice is harmless and the
+latest report always wins. That is also why prices settle a second or two after
+the cards appear: the first report goes out the moment a card is added, and the
 priced version follows.
+
+## Catching up
+
+A report that fails is not lost. chat-cards resends **every pack in the
+session**:
+
+- **when it starts** — a new process cannot know which reports landed before it
+  stopped, or whether multichat still has them;
+- **as soon as a report lands after one has failed** — multichat is evidently
+  back, so it is given everything it missed along with it;
+- **on a timer while reports are failing** — 2 s after the first failure, then
+  5 s, 15 s, 30 s, and once a minute for as long as multichat stays away, so a
+  pack that was opened and finished during the outage is caught up without
+  waiting for the next draw.
+
+The resend is one POST at a time and gives way to live events, so the pack on
+screen is never queued behind a long session. An attempt stops at its first
+failed POST: a multichat that is down costs one refused connection per attempt,
+however many packs are waiting.
+
+Because the whole session is resent, clear both sides together. After
+`multichat giveaway campaign-reset`, also `POST /api/session/reset` here;
+otherwise the next catch-up hands multichat last campaign's packs again (they
+show up in `multichat giveaway packs`, attached to no turn).
 
 ## When it breaks
 
-Reporting is deliberately fire-and-forget. A multichat that is down, restarting
-or misconfigured never interrupts a reveal — the failure is logged and the
-overlay carries on. So the failure mode you will actually see is a *silent* one:
-the overlay looks perfect and multichat's ledger is empty.
+Reporting never holds up the show. A multichat that is down, restarting or
+misconfigured never interrupts a reveal — the failure is logged, the overlay
+carries on, and the ledger is [caught up](#catching-up) once multichat answers.
+So the failure mode you will actually see is a *silent* one: the overlay looks
+perfect and multichat's ledger is empty, and stays empty because the cause is
+configuration rather than an outage.
 
 | Symptom | Cause |
 |---|---|
@@ -104,9 +130,12 @@ the overlay looks perfect and multichat's ledger is empty.
 | `HTTP 501` in the log | multichat has no giveaway enabled; `/api/turn-report` is off |
 | Reports arrive with no `ref` | multichat sent no `ref` — check its subscriber `adapter` |
 
-`journalctl -u chat-cards -f` shows every failed POST with the status and the
+`journalctl -u chat-cards -f` shows a failed report with the status and the
 first line of the response body. A successful start logs the target once:
-`Reporting pack summaries to http://…`.
+`Reporting pack summaries to http://…`. During an outage the log says once that
+multichat `is not taking pack reports … retrying` — the retries themselves are
+quiet — and `Resent N pack summaries` marks the moment the ledger is whole
+again.
 
 ## Tokens
 

@@ -243,22 +243,31 @@ class PriceChartingClient:
             self._next_at = loop.time() + self._min_interval
 
     async def _get(self, path: str, params: dict[str, str]) -> dict[str, Any] | None:
+        payload, _ = await self._fetch(path, params)
+        return payload
+
+    async def _fetch(
+        self, path: str, params: dict[str, str]
+    ) -> tuple[dict[str, Any] | None, int | None]:
+        """The payload, and the HTTP status it came with — None when nothing came back."""
         if not self._token or self._session is None or self._session.closed:
-            return None
+            return None, None
         payload: dict[str, Any] | None = None
+        status: int | None = None
         for attempt in range(self._retries + 1):
             await self._throttle()
             try:
                 async with self._session.get(
                     f"{BASE_URL}{path}", params={**params, "t": self._token}
                 ) as response:
+                    status = response.status
                     if response.status == 429 and attempt < self._retries:
                         log.info("PriceCharting %s rate limited — retrying", path)
                         await asyncio.sleep(3.0 * (attempt + 1))
                         continue
                     if response.status >= 400:
                         log.info("PriceCharting %s returned %s", path, response.status)
-                        return None
+                        return None, status
                     payload = await response.json(content_type=None)
                     break
             except Exception as exc:  # a slow third party must never fail a scan
@@ -266,23 +275,30 @@ class PriceChartingClient:
                     log.info("PriceCharting %s timed out — retrying", path)
                     continue
                 log.info("PriceCharting %s failed: %r", path, exc)
-                return None
+                return None, None
         if payload is None:
-            return None
+            return None, status
 
         if payload.get("status") != "success":
             log.info("PriceCharting %s: %s", path, payload.get("error-message"))
-            return None
-        return payload
+            return None, status
+        return payload, status
 
-    async def health(self) -> bool:
+    async def health(self) -> bool | None:
         """True when the token is accepted and returns price data.
 
         Identity comes back even for a token with no price entitlement — the
         published demo token does exactly that — so a usable token is one whose
         response actually carries `loose-price`.
+
+        None when the question could not be put: no connection, a timeout, or
+        PriceCharting itself throttling or failing. That says nothing about the
+        token, and reporting it as a bad one sends someone to check a
+        subscription that is fine.
         """
-        payload = await self._get("/product", {"q": "charizard #4 pokemon base set"})
+        payload, status = await self._fetch("/product", {"q": "charizard #4 pokemon base set"})
+        if payload is None and (status is None or status == 429 or status >= 500):
+            return None
         return bool(payload and "loose-price" in payload)
 
     async def price(
