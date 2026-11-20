@@ -8,8 +8,9 @@ no extra plumbing, and each POST carries the pack's full current state so a
 dropped update is reconciled by the next one (multichat upserts by pack id).
 
 A pack with no next update would stay wrong for good, so the reporter also
-resends: every pack once when it starts, and every pack again once multichat
-answers after a POST has failed.
+resends: every pack once when it starts, every pack again once multichat
+answers after a POST has failed, and again whenever the Store had to drop
+updates the reporter was too far behind to take.
 
 ``pack_summary`` is a pure function so it can be unit-tested without a live
 server; the ``Reporter`` is the thin async wiring around it.
@@ -23,6 +24,8 @@ from collections import deque
 from typing import Any, Sequence
 
 import aiohttp
+
+from .state import Subscription
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +48,10 @@ _PACK_EVENTS = {
 # An attempt stops at its first failed POST, so a dead sink costs one refused
 # connection per attempt however many packs are waiting.
 RESYNC_RETRY_DELAYS = (2.0, 5.0, 15.0, 30.0, 60.0)
+
+# Seconds one POST may take. multichat answers in milliseconds or not at all,
+# and a report still waiting holds up every report behind it.
+POST_TIMEOUT = 5.0
 
 
 def _sec_to_ms(value: Any) -> int | None:
@@ -101,8 +108,9 @@ class Reporter:
     What multichat missed is made up afterwards. Every pack in the session is
     owed a resend when the reporter starts — a new process cannot know which
     reports landed before it, nor whether multichat still has them — and again
-    whenever a POST fails. The resend is one POST at a time and only while no
-    live event is waiting, so a long session cannot hold up the pack on screen.
+    whenever a POST fails or the Store drops an update this reporter had no
+    room for. The resend is one POST at a time and only while no live event is
+    waiting, so a long session cannot hold up the pack on screen.
     """
 
     def __init__(
@@ -116,7 +124,7 @@ class Reporter:
         self._url = url
         self._token = token
         self._retry_delays = tuple(retry_delays)
-        self._queue: asyncio.Queue | None = None
+        self._queue: Subscription | None = None
         self._task: asyncio.Task | None = None
         self._session: aiohttp.ClientSession | None = None
 
@@ -156,6 +164,16 @@ class Reporter:
         getter: asyncio.Task | None = None
         try:
             while True:
+                if self._queue.overflowed:
+                    # Reports were going out slower than the cards came in, and
+                    # the Store dropped what this queue could not hold. Those
+                    # were the newest updates, so the last report to go out will
+                    # not be how its pack ended up: owe multichat the session
+                    # again. It goes once the queue is clear.
+                    self._queue.overflowed = False
+                    self._owed = True
+                    self._backlog = None
+                    self._snapshot = None
                 if getter is None:
                     getter = asyncio.ensure_future(self._queue.get())
                 # Live events first. A resend step is taken only when the wait
@@ -196,12 +214,18 @@ class Reporter:
         if not await self._post(summary):
             self._fell_behind()
         elif self._owed:
-            # multichat is answering, and it has just been given this pack as it
-            # stands now: send it the rest straight away.
+            # multichat is answering: send it the rest straight away.
             if self._backlog is None:
                 self._begin_resend()
-            if pack_id in self._backlog:
+            if self._snapshot is None:
+                self._snapshot = self._store.snapshot()
+            # This pack is among the rest unless what just landed is how it
+            # stands now. A report says how its pack stood when the event was
+            # queued, and after an outage that can be many updates ago — some
+            # of them dropped, with no later event coming to correct it.
+            if pack_id in self._backlog and pack_summary(self._snapshot, pack_id) == summary:
                 self._backlog.remove(pack_id)
+                self._resent += 1
             self._retry_at = 0.0
 
     def _begin_resend(self) -> None:
@@ -275,7 +299,7 @@ class Reporter:
             headers["authorization"] = f"Bearer {self._token}"
         try:
             async with self._session.post(
-                self._url, json=summary, headers=headers, timeout=aiohttp.ClientTimeout(total=5)
+                self._url, json=summary, headers=headers, timeout=aiohttp.ClientTimeout(total=POST_TIMEOUT)
             ) as resp:
                 if resp.status >= 400:
                     body = await resp.text()

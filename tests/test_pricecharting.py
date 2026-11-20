@@ -28,6 +28,9 @@ from chat_cards.pricecharting import (  # noqa: E402
 )
 
 
+TOKEN = "0123456789abcdef0123456789abcdef01234567"
+
+
 def product(name: str, console: str) -> dict:
     return {"product-name": name, "console-name": console}
 
@@ -92,15 +95,15 @@ class ChooseTests(unittest.TestCase):
 class HealthTests(unittest.TestCase):
     """health() against a loopback stand-in: a bad token and no answer are different things."""
 
-    def verdict(self, status: int | None, payload: dict | None = None) -> bool | None:
+    def verdict(self, status: int | None, payload: object = None, respond=None) -> bool | None:
         async def run() -> bool | None:
-            async def respond(_request: web.Request) -> web.Response:
-                return web.json_response(payload or {}, status=status)
+            async def answer(_request: web.Request) -> web.Response:
+                return web.json_response({} if payload is None else payload, status=status)
 
-            upstream = Upstream(respond)
+            upstream = Upstream(respond or answer)
             if status is not None:
                 await upstream.up()
-            client = PriceChartingClient("token", rate_limit=0)
+            client = PriceChartingClient(TOKEN, rate_limit=0)
             await client.start()
             try:
                 with mock.patch.object(pricecharting, "BASE_URL", upstream.url):
@@ -125,6 +128,45 @@ class HealthTests(unittest.TestCase):
         self.assertIsNone(self.verdict(None))  # connection refused
         self.assertIsNone(self.verdict(503))
         self.assertIsNone(self.verdict(429))
+
+    def test_json_that_is_not_a_response_is_no_answer_either(self) -> None:
+        # Something answering in PriceCharting's place: nothing was learned
+        # about the token, and nothing may blow up on the way to saying so.
+        for payload in ([1, 2, 3], "maintenance", 0):
+            with self.subTest(payload=payload):
+                self.assertIsNone(self.verdict(200, payload))
+
+    def test_the_token_stays_out_of_the_log(self) -> None:
+        # A redirect loop is reported by the HTTP client with the whole URL,
+        # query string included — and the token is in the query string.
+        async def loop(request: web.Request) -> web.Response:
+            raise web.HTTPFound(request.path_qs)
+
+        with self.assertLogs("chat_cards.pricecharting", level="INFO") as logs:
+            self.assertIsNone(self.verdict(200, respond=loop))
+        self.assertIn("TooManyRedirects", "\n".join(logs.output))
+        self.assertNotIn(TOKEN, "\n".join(logs.output))
+
+
+class PriceTests(unittest.TestCase):
+    def test_a_garbage_answer_is_a_miss_not_an_exception(self) -> None:
+        async def run() -> None:
+            async def respond(_request: web.Request) -> web.Response:
+                return web.json_response([1, 2, 3])
+
+            upstream = Upstream(respond)
+            await upstream.up()
+            client = PriceChartingClient(TOKEN, rate_limit=0)
+            await client.start()
+            try:
+                with mock.patch.object(pricecharting, "BASE_URL", upstream.url):
+                    self.assertIsNone(await client.price("Mew ex", "151", "Scarlet & Violet 151"))
+                self.assertEqual(client.last_miss, "PriceCharting did not answer")
+            finally:
+                await client.close()
+                await upstream.down()
+
+        asyncio.run(run())
 
 
 if __name__ == "__main__":

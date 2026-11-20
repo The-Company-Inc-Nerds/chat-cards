@@ -98,10 +98,14 @@ session**:
   stopped, or whether multichat still has them;
 - **as soon as a report lands after one has failed** — multichat is evidently
   back, so it is given everything it missed along with it;
-- **on a timer while reports are failing** — 2 s after the first failure, then
-  5 s, 15 s, 30 s, and once a minute for as long as multichat stays away, so a
-  pack that was opened and finished during the outage is caught up without
-  waiting for the next draw.
+- **on a timer while reports are failing** — every couple of seconds at first,
+  then 5 s, 15 s and 30 s apart, and once a minute for as long as multichat
+  stays away, so a pack that was opened and finished during the outage is
+  caught up without waiting for the next draw;
+- **when it has fallen behind** — reports go out one at a time, and a multichat
+  that answers slowly, or takes its full five seconds not to answer, can leave
+  more updates waiting than chat-cards holds on to. The ones it lets go are
+  made up by a resend as soon as the waiting ones are out.
 
 The resend is one POST at a time and gives way to live events, so the pack on
 screen is never queued behind a long session. An attempt stops at its first

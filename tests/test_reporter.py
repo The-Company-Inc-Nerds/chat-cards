@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -26,6 +27,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from aiohttp import web  # noqa: E402
 
 from _support import Upstream, until  # noqa: E402
+from chat_cards import reporter as reporter_module  # noqa: E402
 from chat_cards.reporter import Reporter, pack_summary  # noqa: E402
 from chat_cards.state import Store  # noqa: E402
 
@@ -134,6 +136,26 @@ async def unavailable(_request: web.Request) -> web.Response:
     return web.Response(status=503, text="starting up")
 
 
+async def hang(_request: web.Request) -> web.Response:
+    await asyncio.sleep(3600)
+    return web.Response()
+
+
+def whole(store: Store, sink: Sink, pack_id: str) -> bool:
+    """True when the sink holds this pack exactly as the store has it now."""
+    return sink.ledger.get(pack_id) == pack_summary(store.snapshot(), pack_id)
+
+
+async def scan_burst(store: Store, cards: int) -> None:
+    """Scan and price cards back to back, with no pause for the reporter to keep up in.
+
+    Two updates a card. The Store holds 32 for a listener and drops the rest.
+    """
+    for n in range(cards):
+        card = await store.add_card()
+        await store.update_card(card.uid, event="card_priced", name=f"Card {n}", value=1.0)
+
+
 class ReporterTests(unittest.TestCase):
     def test_start_resends_every_pack_once(self) -> None:
         async def run() -> None:
@@ -196,9 +218,14 @@ class ReporterTests(unittest.TestCase):
                 await sink.up()
                 await asyncio.sleep(0.1)
                 self.assertEqual(sink.posted, [first.id])
-                third = await store.open_pack(5, "Cy", None)
-                await until(lambda: len(sink.posted) == 4)
-                await asyncio.sleep(0.1)
+                with self.assertLogs("chat_cards.reporter", level="INFO") as logs:
+                    third = await store.open_pack(5, "Cy", None)
+                    await until(lambda: len(sink.posted) == 4)
+                    await asyncio.sleep(0.1)
+                # The line that says the ledger can be trusted again.
+                self.assertEqual(
+                    logs.output, [f"INFO:chat_cards.reporter:Resent 3 pack summaries to {sink.target}"]
+                )
 
                 # The live pack went first and was not sent twice.
                 self.assertEqual(sink.posted[1], third.id)
@@ -313,23 +340,119 @@ class ReporterTests(unittest.TestCase):
         asyncio.run(run())
 
     def test_a_hung_sink_does_not_hold_up_the_reveal(self) -> None:
-        async def hang(_request: web.Request) -> web.Response:
-            await asyncio.sleep(3600)
-            return web.Response()
-
         async def run() -> None:
             store, sink = new_store(), Sink(hang)
             await sink.up()
             reporter = Reporter(store, sink.target, None, retry_delays=NEVER)
             await reporter.start()
+            overlay = store.subscribe()  # what the overlay's socket is fed from
             try:
                 started = time.monotonic()
                 await store.open_pack(5, "Ann", None)
+                # The report is out and will sit there for its full five seconds.
+                await until(lambda: len(sink.requests) == 1)
                 for _ in range(5):
                     await store.add_card()
-                # Each POST would take its full five-second timeout to give up.
+                    await asyncio.sleep(0.01)  # the loop runs, reporter included
                 self.assertLess(time.monotonic() - started, 3.0)
+                self.assertEqual(overlay.qsize(), 6)
                 self.assertEqual(store.snapshot()["pack"]["revealed"], 5)
+            finally:
+                await reporter.close()
+                await sink.down()
+
+        asyncio.run(run())
+
+    def test_a_report_that_gets_no_answer_is_given_up_on(self) -> None:
+        # multichat takes the connection and never replies. Without a limit on
+        # the POST, that one report would be the last thing the reporter did.
+        async def run() -> None:
+            store, sink = new_store(), Sink(hang)
+            await sink.up()
+            reporter = Reporter(store, sink.target, None, retry_delays=(0.02,))
+            await reporter.start()
+            try:
+                with self.assertLogs("chat_cards.reporter", level="WARNING"):
+                    pack = await store.open_pack(5, "Ann", None)
+                    await until(lambda: len(sink.requests) >= 2)  # given up on, and retried
+                sink.respond = Sink._ok
+                await until(lambda: whole(store, sink, pack.id))
+            finally:
+                await reporter.close()
+                await sink.down()
+
+        with mock.patch.object(reporter_module, "POST_TIMEOUT", 0.2):
+            asyncio.run(run())
+
+    def test_a_stale_report_landing_first_does_not_count_as_caught_up(self) -> None:
+        async def run() -> None:
+            calls = 0
+
+            async def down_then_up(request: web.Request) -> web.Response:
+                nonlocal calls
+                calls += 1
+                return await (unavailable if calls == 2 else Sink._ok)(request)
+
+            store, sink = new_store(), Sink(down_then_up)
+            await sink.up()
+            reporter = Reporter(store, sink.target, None, retry_delays=NEVER)
+            await reporter.start()
+            try:
+                pack = await store.open_pack(5, "Ann", None)
+                await until(lambda: sink.posted == [pack.id])
+
+                # One report fails; by the time multichat answers again, more
+                # has happened to the pack than the reporter's queue could hold.
+                # The first report to land is an old one from that queue.
+                with self.assertLogs("chat_cards", level="WARNING"):
+                    await scan_burst(store, 20)
+                    await until(lambda: whole(store, sink, pack.id))
+                self.assertEqual(sink.ledger[pack.id]["cardCount"], 20)
+                self.assertEqual(sink.ledger[pack.id]["totalValue"], 20.0)
+            finally:
+                await reporter.close()
+                await sink.down()
+
+        asyncio.run(run())
+
+    def test_updates_the_store_had_to_drop_are_made_up(self) -> None:
+        # No report fails here: multichat answers every one, just not as fast
+        # as the cards come. What the queue could not hold is simply gone, and
+        # the last report to go out is not how the pack ended.
+        async def run() -> None:
+            store, sink = new_store(), Sink()
+            await sink.up()
+            reporter = Reporter(store, sink.target, None, retry_delays=NEVER)
+            await reporter.start()
+            try:
+                pack = await store.open_pack(5, "Ann", None)
+                await until(lambda: sink.posted == [pack.id])
+
+                with self.assertLogs("chat_cards.state", level="WARNING") as logs:
+                    await scan_burst(store, 20)
+                self.assertTrue(all("Dropping update" in line for line in logs.output))
+
+                await until(lambda: whole(store, sink, pack.id))
+                self.assertEqual(sink.ledger[pack.id]["cardCount"], 20)
+            finally:
+                await reporter.close()
+                await sink.down()
+
+        asyncio.run(run())
+
+    def test_an_unexpected_error_does_not_end_reporting(self) -> None:
+        async def run() -> None:
+            store, sink = new_store(), Sink()
+            await sink.up()
+            reporter = Reporter(store, sink.target, None, retry_delays=(0.02,))
+            await reporter.start()
+            try:
+                broken = mock.patch.object(reporter_module, "pack_summary", side_effect=RuntimeError("boom"))
+                with broken, self.assertLogs("chat_cards.reporter", level="ERROR"):
+                    pack = await store.open_pack(5, "Ann", None)
+                    await asyncio.sleep(0.1)
+                self.assertEqual(sink.requests, [])
+                await until(lambda: whole(store, sink, pack.id))
             finally:
                 await reporter.close()
                 await sink.down()

@@ -39,28 +39,33 @@ FILE` preflights a real key against the CardSight API.
 
 ## Start-up and state
 
-Start-up never waits on the network. `_on_startup` in `server.py` only opens the
-HTTP sessions, settles the previous run's unfinished cards and starts the
-reporter; the CardSight key and PriceCharting token are verified by a
-background task (`_check_upstreams`), retried while an upstream is unreachable
-(`CHECK_RETRY_DELAYS`), and reported on `/healthz` as `cardsight_auth` /
-`pricecharting` plus `checks` (`"pending"` → `"done"`). Keep anything that can
-block out of `_on_startup`: the port is bound only after it returns, and the
-overlay and `POST /api/pack` must come up on a box with no internet.
+Start-up never waits on the network, nor on the disk. `_on_startup` in
+`server.py` only opens the HTTP sessions, hands the previous run's unfinished
+cards to background tasks and starts the reporter; the CardSight key and
+PriceCharting token are verified by a background task (`_check_upstreams`),
+retried while an upstream is unreachable (`CHECK_RETRY_DELAYS`), and reported
+on `/healthz` as `cardsight_auth` / `pricecharting` plus `checks` (`"pending"`
+→ `"done"`). Keep anything that can block or fail out of `_on_startup`: the
+port is bound only after it returns, and the overlay and `POST /api/pack` must
+come up on a box with no internet or a full disk.
 
 Everything under the state directory goes through `write_atomic` in `state.py`
 (temp file, fsync, rename). An unreadable `session.json` is moved aside as
 `session.json.corrupt-<UTC time>`, never overwritten. A card left `identifying`
-by a dead process is settled at start (`_settle_unfinished`): identified ones
-are re-priced, the rest are failed like any other bad scan — never re-submitted,
-because identify is the billed call. `tests/test_state.py` and
+by a dead process is settled after the start (`_settle_unfinished`): identified
+ones are re-priced once an upstream has answered the start-up check
+(`_resume_pricing` — sooner, an offline boot would settle them at $0.00), the
+rest are failed like any other bad scan after `INTERRUPTED_SCAN_GRACE`, when the
+pages have reconnected to be told — never re-submitted, because identify is the
+billed call. `tests/test_state.py` and
 `tests/test_server.py` cover this with fakes and loopback sockets only;
 `tests/_support.py` holds the stand-in upstream they share.
 
 The NixOS unit (`nix/module.nix`) has its start limit disabled and
-`Restart=always` with a back-off, so it is never parked in `failed`; do not
-reintroduce a start limit — the default sits exactly on the unit's restart
-interval.
+`Restart=always` with a short back-off, so it is never parked in `failed`; do
+not reintroduce a start limit — the default sits exactly on the unit's restart
+interval. It is ordered after `network.target`, not `network-online.target`,
+so a boot without an uplink does not hold the overlay back.
 
 ## Pricing recorded videos
 
@@ -93,9 +98,10 @@ subscribes to the `Store` event stream and POSTs each pack's cards + running
 value back to multichat's `/api/turn-report` so its per-winner ledger stays
 complete. A failed POST never blocks a reveal; instead the reporter resends
 every pack in the session when it starts, on the first POST that lands after a
-failure, and on a backed-off timer (`RESYNC_RETRY_DELAYS`) while multichat is
-away — one POST at a time, live events first (multichat upserts by pack id, so
-resending is idempotent). Enable with `--report-url URL` + `CHAT_CARDS_REPORT_TOKEN`
+failure, on a backed-off timer (`RESYNC_RETRY_DELAYS`) while multichat is
+away, and whenever the `Store` had to drop updates it was too far behind to
+take (`Subscription.overflowed`) — one POST at a time, live events first
+(multichat upserts by pack id, so resending is idempotent). Enable with `--report-url URL` + `CHAT_CARDS_REPORT_TOKEN`
 (or `--report-token-file`), or `services.chat-cards.report.url` /
 `report.tokenFile` on NixOS; it runs in mock mode too, so the whole
 giveaway→pack→ledger loop can be rehearsed offline. No token is needed when both
@@ -103,7 +109,8 @@ services share a box — multichat accepts unauthenticated reports over loopback
 `docs/guides/giveaway-loop.md` is the operator-facing version. `pack_summary()`
 is pure and unit-tested in `tests/`, and the resend is tested against a loopback
 sink that goes down and comes back (stdlib `unittest`: `PYTHONPATH=src python -m
-unittest discover -s tests`).
+unittest discover -s tests`; `nix flake check` runs the same suite as
+`checks.unit`).
 
 ## Committing: write the message, never run `git commit`
 

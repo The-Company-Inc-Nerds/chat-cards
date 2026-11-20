@@ -46,7 +46,9 @@ A WebSocket frame is `{type: "state", event, state}`. `event` is one of
 it does not recognise.
 
 `card_failed` carries a `reason` and means the scan was dropped because the API
-could not identify it. The scanner turns that into a "scan it again" prompt;
+could not identify it — or because a restart cut the lookup short, in which
+case the frame follows a few seconds after the restart, once the pages have
+reconnected. The scanner turns it into a "scan it again" prompt;
 without it a vanishing row would look like nothing happened. `card_failed` and
 `card_removed` frames also carry the `pack_id` the card belonged to, since the
 card itself is no longer in the snapshot.

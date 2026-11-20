@@ -36,6 +36,9 @@ class WriteAtomicTests(unittest.TestCase):
         real_fsync, real_replace = os.fsync, os.replace
 
         def fsync(fd: int) -> None:
+            # All of it has to have left the process by now: forcing a file
+            # to disk forces what the kernel has, not what is still buffered.
+            self.assertEqual(os.fstat(fd).st_size, len(b"new"))
             order.append("fsync")
             real_fsync(fd)
 
@@ -59,6 +62,9 @@ class WriteAtomicTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 write_atomic(path, b"new")
         self.assertEqual(path.read_bytes(), b"old")
+        # Nor its own half-written file: on a full disk that would be what
+        # keeps the disk full.
+        self.assertEqual([p.name for p in path.parent.iterdir()], ["session.json"])
 
     def test_store_saves_through_it(self) -> None:
         path = tmpdir() / "session.json"

@@ -85,16 +85,20 @@ from the current state; nothing is lost.
 
 **The service restarts mid-pack.** Session state is on disk. The overlay
 reconnects on its own and the open pack is still open. A card that was caught
-mid-lookup is settled at start rather than left spinning: one that had already
-been identified keeps its name and art and gets its price looked up again; one
-that had not is dropped — scan it again. (With `autoDeleteUnmatched = false` it
-stays on the reel, marked "Interrupted by a restart".) A restart never
-re-submits a photo by itself, because identification is the billed call.
+mid-lookup is settled after the restart rather than left spinning: one that had
+already been identified keeps its name and art and gets its price looked up
+again, as soon as one of the APIs can be reached; one that had not is dropped a few
+seconds after the restart, with the same "scan that card again" on the phone
+as any failed scan. (With `autoDeleteUnmatched = false` it stays on the reel,
+marked "Interrupted by a restart".) A restart never re-submits a photo by
+itself, because identification is the billed call.
 
 **The internet drops.** The overlay, the totals and pack opening carry on —
 none of them leaves the box. Scans fail while it is down and are dropped like
 any other failed scan; re-scan once it is back. The service also starts fine
-without the internet, so a reboot during an outage still brings the overlay up.
+without the internet, and does not wait for it, so a reboot during an outage
+still brings the overlay up straight away. A card that was waiting for its
+price across that reboot keeps waiting until the uplink is there.
 
 **The power goes out.** Same as a restart. Every change is forced to disk
 before it replaces the previous state, so the session comes back whole — at

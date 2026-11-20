@@ -45,6 +45,22 @@
     checks.${system} = {
       package = self.packages.${system}.chat-cards;
 
+      # The unit tests. They use fakes and loopback sockets only, so they run
+      # inside the build sandbox; without this, nothing runs them but a person
+      # remembering to.
+      unit =
+        pkgs.runCommand "chat-cards-unit-tests" {
+          nativeBuildInputs = [(pkgs.python3.withPackages (ps: [ps.aiohttp]))];
+          src = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [./src ./tests];
+          };
+        } ''
+          cd "$src"
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest discover -s tests
+          touch "$out"
+        '';
+
       # Boots the module in mock mode and drives the real HTTP surface, so a
       # broken unit or a bad hardening flag fails here rather than mid-stream.
       # Also the only place the unit's restart behaviour and the resend to

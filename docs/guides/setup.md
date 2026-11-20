@@ -82,7 +82,9 @@ every five minutes from there for as long as an API stays out of reach — so a
 box that boots before its uplink verifies its key by itself once the network is
 there. `"done"` means every configured credential has a verdict (or there was
 nothing to check). A rejected key is a verdict and is not asked about again:
-restart the service after replacing it.
+restart the service after replacing it. An answer that is not the API's own —
+a captive portal's page, a proxy's error — is not a verdict, and is asked
+about again like no answer at all.
 
 ## 1b. Get a PriceCharting token
 

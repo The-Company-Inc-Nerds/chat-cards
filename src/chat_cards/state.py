@@ -9,6 +9,7 @@ nothing, and written so that pulling the plug mid-write costs nothing either.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -44,13 +45,22 @@ def write_atomic(path: Path, data: bytes) -> None:
     commit the rename first, and a power cut in between leaves a zero-length
     file under the real name: exactly the file a crash-safe write was meant to
     prevent.
+
+    A write that fails takes its temporary file with it. On a full disk that
+    partial file is what holds the last free space, and left behind it would
+    fail every write after this one as well.
     """
     tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "wb") as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)  # atomic: readers never see a half-written file
+    try:
+        with open(tmp, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)  # atomic: readers never see a half-written file
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise
 
 
 def quarantine_path(path: Path, now: float) -> Path:
@@ -172,6 +182,18 @@ def _sum_values(cards: Iterable[Card]) -> float:
     return round(sum(c.value for c in cards if c.value is not None), 2)
 
 
+class Subscription(asyncio.Queue):
+    """One listener's queue of updates.
+
+    `overflowed` is set when the queue was full and an update was dropped. A
+    page on a WebSocket can ignore it — the next update redraws everything —
+    but a listener that passes updates on cannot count on there being a next
+    one, and clears the flag when it has taken note of the gap.
+    """
+
+    overflowed = False
+
+
 class Store:
     """Owns the session, its file on disk, and the set of live WebSocket listeners."""
 
@@ -180,7 +202,7 @@ class Store:
         self._default_pack_size = default_pack_size
         self._session = Session()
         self._lock = asyncio.Lock()
-        self._subscribers: set[asyncio.Queue] = set()
+        self._subscribers: set[Subscription] = set()
 
     # ---------------------------------------------------------------- persistence
 
@@ -221,12 +243,12 @@ class Store:
 
     # ------------------------------------------------------------------ broadcast
 
-    def subscribe(self) -> asyncio.Queue:
-        queue: asyncio.Queue = asyncio.Queue(maxsize=32)
+    def subscribe(self) -> Subscription:
+        queue = Subscription(maxsize=32)
         self._subscribers.add(queue)
         return queue
 
-    def unsubscribe(self, queue: asyncio.Queue) -> None:
+    def unsubscribe(self, queue: Subscription) -> None:
         self._subscribers.discard(queue)
 
     def _publish(self, event: str | None = None, **extra: Any) -> None:
@@ -236,6 +258,7 @@ class Store:
                 queue.put_nowait(message)
             except asyncio.QueueFull:
                 # A wedged client must not slow the reveal for everyone else.
+                queue.overflowed = True
                 log.warning("Dropping update for a subscriber that stopped reading")
 
     async def commit(self, event: str | None = None, **extra: Any) -> None:

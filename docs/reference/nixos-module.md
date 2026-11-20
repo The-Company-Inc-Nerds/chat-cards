@@ -124,12 +124,18 @@ real certificate and no warning to tap through.
 
 ## Start-up
 
-The unit is ordered after `network-online.target`, but the service does not
-depend on the network being any use: it binds its port first and verifies the
-CardSight key and PriceCharting token in the background. With CardSight
-unreachable the overlay, the scanner page and `POST /api/pack` are still up
-within a second of the start; `/healthz` reports `"checks": "pending"` until
-the APIs have answered (see [setup](../guides/setup.md#2-run-it)).
+The unit does not wait for the network. It is ordered after `network.target`
+only — not `network-online.target`, which on a host that boots during an outage
+is not reached until its wait-online unit gives up, a minute later with
+NetworkManager. The service binds its port first and verifies the CardSight key
+and PriceCharting token in the background, so the overlay, the scanner page and
+`POST /api/pack` are up within a second of the start with or without an
+uplink; `/healthz` reports `"checks": "pending"` until the APIs have answered
+(see [setup](../guides/setup.md#2-run-it)).
+
+The defaults bind `0.0.0.0`, which needs no interface to be up. With `address`
+set to one particular LAN address the first starts can fail until that address
+exists; the unit [keeps retrying](#restarts) and comes up once it does.
 
 ## Restarts
 
@@ -140,7 +146,7 @@ The unit is meant to stay up for as long as the host does:
 | `StartLimitIntervalSec` | `0` | never parked in `failed` by a burst of starts |
 | `Restart` | `always` | comes back after a clean exit too, not only a crash |
 | `RestartSec` | `2` | first retry after two seconds |
-| `RestartSteps` / `RestartMaxDelaySec` | `5` / `30` | then backs off to one retry every 30 s |
+| `RestartSteps` / `RestartMaxDelaySec` | `5` / `10` | then backs off to one retry every 10 s |
 
 The start limit matters more than it looks. systemd's default allows five
 starts in ten seconds, and a unit retrying every two seconds sits exactly on
@@ -150,19 +156,20 @@ start, and the unit is parked in `failed` where `Restart=` no longer applies.
 
 The back-off keeps a start that cannot succeed yet (a credential file that has
 not arrived) from logging a failure every two seconds indefinitely: the gaps
-grow 2 s, 3.4 s, 5.9 s, 10 s, 17.5 s and then stay at 30 s. The price is that
-such a unit can take up to 30 s to notice the file; a unit that writes the
+grow 2 s, 2.8 s, 3.8 s, 5.2 s, 7.2 s and then stay at 10 s. The price is that
+such a unit can take up to 10 s to notice the file; a unit that writes the
 secret and then restarts chat-cards gets it immediately.
 
 systemd counts automatic restarts since the unit was last started by a job —
 `systemctl restart`, a rebuild, another unit — and nothing else resets the
-count. So a crash is back in two seconds, but after five automatic restarts in
-one run of the unit, the next crash waits the full 30 s. Both settings are
-`mkDefault`, so a host that would rather have a noisier log than a longer gap
-can choose its own pace:
+count, not even hours of running well. So a crash is back in two seconds, but
+after five automatic restarts in one run of the unit, the next crash waits the
+full 10 s, and for that long there is no overlay and no pack endpoint. That is
+why the ceiling is no higher. Both settings are `mkDefault`, so a host that
+would rather have a quieter log than a shorter gap can choose its own pace:
 
 ```nix
-systemd.services.chat-cards.serviceConfig.RestartMaxDelaySec = 10;
+systemd.services.chat-cards.serviceConfig.RestartMaxDelaySec = 30;
 ```
 
 ## State
@@ -186,12 +193,16 @@ moves the file aside as `session.json.corrupt-<UTC time>` so the first change
 does not write over it. Nothing removes those files; delete them once you have
 looked.
 
-A card that was mid-lookup when the service stopped is settled at the next
+A card that was mid-lookup when the service stopped is settled after the next
 start instead of staying a placeholder. If it had already been identified it
-keeps its identity and its price is looked up again. If not, it is treated like
-any other failed scan — dropped, or kept and flagged when
-`autoDeleteUnmatched = false` — and **not** re-submitted: identification is the
-billed call, and a restart should never spend one by itself.
+keeps its identity and its price is looked up again — once one of the APIs
+has answered the start-up check, so that a box that boots before its uplink
+does not record "price unavailable" for it. If not, it is treated like any other
+failed scan — dropped, or kept and flagged when `autoDeleteUnmatched = false` —
+and **not** re-submitted: identification is the billed call, and a restart
+should never spend one by itself. That happens five seconds after the start,
+when the scanner page has reconnected and can tell the producer to scan the
+card again.
 
 `captures/` and `card-images/` are never pruned, and `POST /api/session/reset`
 leaves them alone. A scan is a few hundred kilobytes, so growth is slow — tens
@@ -210,4 +221,5 @@ API and write exactly one directory.
 `nix flake check` boots the module in a VM and asserts it starts under all of
 that, serves both pages, keeps its state across `systemctl restart`, survives a
 burst of restarts without being parked, comes back after a clean exit, and
-catches multichat up on a pack it missed while it was down.
+catches multichat up on a pack it missed while it was down. It also runs the
+unit tests.

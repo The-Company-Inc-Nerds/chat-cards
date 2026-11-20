@@ -65,7 +65,9 @@ class Upstream:
     async def up(self) -> None:
         app = web.Application()
         app.router.add_route("*", "/{tail:.*}", self._handle)
-        self._runner = web.AppRunner(app)
+        # A handler still running when the stand-in is taken down is one a test
+        # left hanging on purpose; aiohttp's default is to give it a minute.
+        self._runner = web.AppRunner(app, shutdown_timeout=0.1)
         await self._runner.setup()
         await web.TCPSite(self._runner, "127.0.0.1", self.port).start()
 

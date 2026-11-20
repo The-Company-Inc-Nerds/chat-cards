@@ -269,12 +269,19 @@ class PriceChartingClient:
                         log.info("PriceCharting %s returned %s", path, response.status)
                         return None, status
                     payload = await response.json(content_type=None)
+                    if not isinstance(payload, dict):
+                        # JSON, but not theirs: a proxy or a portal answering in
+                        # their place. That is no answer, not a verdict.
+                        log.info("PriceCharting %s returned JSON that is not a response object", path)
+                        return None, None
                     break
             except Exception as exc:  # a slow third party must never fail a scan
                 if isinstance(exc, asyncio.TimeoutError) and attempt < self._retries:
                     log.info("PriceCharting %s timed out — retrying", path)
                     continue
-                log.info("PriceCharting %s failed: %r", path, exc)
+                # The token rides in the query string, and some client errors
+                # (a redirect loop, for one) quote the whole URL.
+                log.info("PriceCharting %s failed: %s", path, repr(exc).replace(self._token, "…"))
                 return None, None
         if payload is None:
             return None, status
