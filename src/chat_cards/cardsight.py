@@ -423,6 +423,10 @@ class CardSightClient:
         other failure means the check could not be made, and reporting that as a
         rejected key would send someone hunting a problem that is not there. Note
         the path has no /v1 prefix — the health routes sit at the root.
+
+        Never raises. No route, a DNS failure and a timeout are not CardSightErrors
+        — they come straight from the HTTP client — and they are the commonest
+        reason the check cannot be made at all: a box that boots before its uplink.
         """
         try:
             await self._json("GET", "/health/auth")
@@ -432,6 +436,11 @@ class CardSightClient:
                 log.error("CardSight rejected the API key: %s", exc)
                 return False
             log.warning("Could not verify the API key (%s) — continuing anyway", exc)
+            return None
+        except Exception as exc:
+            # A timeout stringifies to nothing at all, so fall back to its name.
+            reason = str(exc) or type(exc).__name__
+            log.warning("Could not reach CardSight to verify the API key (%s) — continuing anyway", reason)
             return None
 
     async def identify(self, image: bytes, content_type: str = "image/jpeg") -> Identification:
